@@ -354,6 +354,7 @@ public class CoinJoinClient
 			CoinsInCriticalPhase = registeredAliceClients.Select(alice => alice.SmartCoin).ToImmutableList();
 
 			var outputTxOuts = await ProceedWithOutputRegistrationPhaseAsync(roundId, registeredAliceClients, cancellationToken).ConfigureAwait(false);
+			LogCoinJoinSummary(registeredAliceClients, outputTxOuts, roundState);
 
 			var (unsignedCoinJoin, aliceClientsThatSigned) = await ProceedWithSigningStateAsync(roundId, registeredAliceClients, outputTxOuts, cancellationToken).ConfigureAwait(false);
 			LogCoinJoinSummary(registeredAliceClients, outputTxOuts, roundState);
