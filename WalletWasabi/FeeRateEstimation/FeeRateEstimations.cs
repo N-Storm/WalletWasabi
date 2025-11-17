@@ -11,6 +11,7 @@ namespace WalletWasabi.FeeRateEstimation;
 public class FeeRateEstimations : IEquatable<FeeRateEstimations>
 {
 	private static readonly int[] AllConfirmationTargets = Constants.ConfirmationTargets.Prepend(1).ToArray();
+	public static readonly FeeRateEstimations Empty = new(new Dictionary<int, FeeRate>{ {0, FeeRate.Zero} });
 
 	/// <summary>All allowed target confirmation ranges, i.e. 0-2, 2-3, 3-6, 6-18, ..., 432-1008.</summary>
 	private static readonly IEnumerable<(int Start, int End)> TargetRanges = AllConfirmationTargets
@@ -19,14 +20,12 @@ public class FeeRateEstimations : IEquatable<FeeRateEstimations>
 
 	public FeeRateEstimations(IDictionary<int, FeeRate> estimations)
 	{
-		Guard.NotNullOrEmpty(nameof(estimations), estimations);
-
 		var filteredEstimations = estimations
 			.Where(x => x.Key >= AllConfirmationTargets[0] && x.Key <= AllConfirmationTargets[^1])
 			.OrderBy(x => x.Key)
 			.Select(x => (ConfirmationTarget: x.Key, FeeRate: x.Value, Range: TargetRanges.First(y => y.Start < x.Key && x.Key <= y.End)))
 			.GroupBy(x => x.Range, y => y, (x, y) => (Range: x, BestEstimation: y.Last()))
-			.Select(x => (ConfirmationTarget: x.Range.End, x.BestEstimation.FeeRate));
+			.Select(x => (ConfirmationTarget: x.Range.End, FeeRate: FeeRate.Max(x.BestEstimation.FeeRate, Constants.MinRelayFeeRate)));
 
 		// Make sure values are unique and in the correct order and fee rates are consistently decreasing.
 		Estimations = [];

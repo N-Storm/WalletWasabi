@@ -25,23 +25,10 @@ public class SmartCoin : NotifyPropertyChangedBase, IEquatable<SmartCoin>, IDest
 	private bool _isBanned;
 	private bool _isExcludedFromCoinJoin;
 
-	private Lazy<uint256> _transactionId;
-	private Lazy<OutPoint> _outPoint;
-	private Lazy<TxOut> _txOut;
-	private Lazy<Coin> _coin;
-	private Lazy<int> _hashCode;
-
 	public SmartCoin(SmartTransaction transaction, uint outputIndex, HdPubKey pubKey)
 	{
 		Transaction = transaction;
-		Index = outputIndex;
-		_transactionId = new Lazy<uint256>(() => Transaction.GetHash(), true);
-
-		_outPoint = new Lazy<OutPoint>(() => new OutPoint(TransactionId, Index), true);
-		_txOut = new Lazy<TxOut>(() => Transaction.Transaction.Outputs[Index], true);
-		_coin = new Lazy<Coin>(() => new Coin(Outpoint, TxOut), true);
-
-		_hashCode = new Lazy<int>(() => Outpoint.GetHashCode(), true);
+		Coin = new Coin(Transaction.Transaction, outputIndex);
 
 		_height = transaction.Height;
 		_confirmed = _height.Type == HeightType.Chain;
@@ -52,12 +39,11 @@ public class SmartCoin : NotifyPropertyChangedBase, IEquatable<SmartCoin>, IDest
 	}
 
 	public SmartTransaction Transaction { get; }
-	public uint Index { get; }
-	public uint256 TransactionId => _transactionId.Value;
-
-	public OutPoint Outpoint => _outPoint.Value;
-	public TxOut TxOut => _txOut.Value;
-	public Coin Coin => _coin.Value;
+	public uint Index => Coin.Outpoint.N;
+	public uint256 TransactionId => Coin.Outpoint.Hash;
+	public OutPoint Outpoint => Coin.Outpoint;
+	public TxOut TxOut => Coin.TxOut;
+	public Coin Coin { get; }
 
 	public Script ScriptPubKey => TxOut.ScriptPubKey;
 	public ScriptType ScriptType => ScriptPubKey.GetScriptType();
@@ -91,13 +77,7 @@ public class SmartCoin : NotifyPropertyChangedBase, IEquatable<SmartCoin>, IDest
 	public DateTimeOffset? BannedUntilUtc
 	{
 		get => _bannedUntilUtc;
-		set
-		{
-			if (RaiseAndSetIfChanged(ref _bannedUntilUtc, value))
-			{
-				RefreshAndGetIsBanned();
-			}
-		}
+		set => RaiseAndSetIfChanged(ref _bannedUntilUtc, value);
 	}
 
 	/// <summary>
@@ -117,14 +97,7 @@ public class SmartCoin : NotifyPropertyChangedBase, IEquatable<SmartCoin>, IDest
 		private set => RaiseAndSetIfChanged(ref _confirmed, value);
 	}
 
-	/// <summary>
-	/// If you want to have a notification about a coin is released, then you have to periodically read IsBanned.
-	/// </summary>
-	public bool IsBanned
-	{
-		get => RefreshAndGetIsBanned();
-		private set => RaiseAndSetIfChanged(ref _isBanned, value);
-	}
+	public bool IsBanned => BannedUntilUtc is not null && BannedUntilUtc > DateTimeOffset.UtcNow;
 
 	public bool IsExcludedFromCoinJoin
 	{
@@ -135,20 +108,6 @@ public class SmartCoin : NotifyPropertyChangedBase, IEquatable<SmartCoin>, IDest
 	/// <returns>False if external, or the tx inputs are all external.</returns>
 	/// <remarks>Context: https://github.com/WalletWasabi/WalletWasabi/issues/10567</remarks>
 	public bool IsSufficientlyDistancedFromExternalKeys { get; set; } = true;
-
-	public bool RefreshAndGetIsBanned()
-	{
-		if (BannedUntilUtc is { } && BannedUntilUtc > DateTimeOffset.UtcNow)
-		{
-			IsBanned = true;
-			return true;
-		}
-
-		IsBanned = false;
-		BannedUntilUtc = null;
-
-		return false;
-	}
 
 	[MemberNotNullWhen(returnValue: true, nameof(SpenderTransaction))]
 	public bool IsSpent() => SpenderTransaction is not null;
@@ -166,7 +125,7 @@ public class SmartCoin : NotifyPropertyChangedBase, IEquatable<SmartCoin>, IDest
 
 	public bool Equals(SmartCoin? other) => this == other;
 
-	public override int GetHashCode() => _hashCode.Value;
+	public override int GetHashCode() => Outpoint.GetHashCode();
 
 	public static bool operator ==(SmartCoin? x, SmartCoin? y)
 	{

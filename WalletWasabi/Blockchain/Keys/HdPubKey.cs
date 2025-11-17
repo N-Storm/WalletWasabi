@@ -1,10 +1,10 @@
 using NBitcoin;
 using System.Collections.Generic;
 using System.Linq;
+using NBitcoin.Secp256k1;
 using WalletWasabi.Bases;
 using WalletWasabi.Blockchain.Analysis.Clustering;
 using WalletWasabi.Helpers;
-using WalletWasabi.Models;
 
 namespace WalletWasabi.Blockchain.Keys;
 
@@ -22,9 +22,8 @@ public class HdPubKey : NotifyPropertyChangedBase, IEquatable<HdPubKey>
 	{
 		PubKey = Guard.NotNull(nameof(pubKey), pubKey);
 		FullKeyPath = Guard.NotNull(nameof(fullKeyPath), fullKeyPath);
-		_cluster = new Cluster(this);
+		_cluster = new Cluster([this]);
 		Labels = labels;
-		Cluster.UpdateLabels();
 		KeyState = keyState;
 
 		_p2wpkhScript = new Lazy<Script>(() => PubKey.GetScriptPubKey(ScriptPubKeyType.Segwit), isThreadSafe: true);
@@ -43,7 +42,7 @@ public class HdPubKey : NotifyPropertyChangedBase, IEquatable<HdPubKey>
 		}
 		else
 		{
-			throw new ArgumentException(nameof(FullKeyPath));
+			IsInternal = false;
 		}
 	}
 
@@ -66,8 +65,11 @@ public class HdPubKey : NotifyPropertyChangedBase, IEquatable<HdPubKey>
 	public KeyPath FullKeyPath { get; }
 
 	public LabelsArray Labels { get; private set; }
+	public LabelsArray ClusterLabels => _cluster.Labels;
 
 	public KeyState KeyState { get; private set; }
+
+	public ECPubKey? TweakData { get; set; }
 
 	public Script P2wpkhScript => _p2wpkhScript.Value;
 	public Script P2Taproot => _p2Taproot.Value;
@@ -93,7 +95,6 @@ public class HdPubKey : NotifyPropertyChangedBase, IEquatable<HdPubKey>
 		}
 
 		Labels = labels;
-		Cluster.UpdateLabels();
 
 		kmToFile?.ToFile();
 	}

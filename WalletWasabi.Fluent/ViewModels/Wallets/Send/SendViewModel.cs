@@ -25,7 +25,7 @@ using WalletWasabi.Fluent.Models.UI;
 using WalletWasabi.Fluent.Models.Wallets;
 using WalletWasabi.Fluent.ViewModels.Wallets.Labels;
 using WalletWasabi.Fluent.Models.Transactions;
-using WalletWasabi.Wallets.Exchange;
+using WalletWasabi.Services;
 using Address = WalletWasabi.Userfacing.Address;
 using Constants = WalletWasabi.Helpers.Constants;
 
@@ -48,7 +48,6 @@ public partial class SendViewModel : RoutableViewModel
 	private readonly IWalletModel _walletModel;
 	private readonly SendFlowModel _parameters;
 	private readonly CoinJoinManager? _coinJoinManager;
-	private readonly ExchangeRateUpdater _exchangeRateUpdater;
 	private readonly ClipboardObserver _clipboardObserver;
 
 	private bool _parsingTo;
@@ -80,8 +79,8 @@ public partial class SendViewModel : RoutableViewModel
 
 		_conversionReversed = Services.UiConfig.SendAmountConversionReversed;
 
-		_exchangeRateUpdater = Services.HostedServices.Get<ExchangeRateUpdater>();
-		ExchangeRate = _exchangeRateUpdater.UsdExchangeRate;
+		_exchangeRate = Services.Status.UsdExchangeRate;
+		Services.EventBus.Subscribe<ExchangeRateChanged>(er => _exchangeRate = er.UsdBtcRate);
 
 		Balance =
 			_parameters.IsManual
@@ -292,6 +291,11 @@ public partial class SendViewModel : RoutableViewModel
 				errors.Add(ErrorSeverity.Error, parseResult.Error);
 				return;
 			}
+			if (parseResult is {IsOk: true, Value: Address.SilentPayment} && _walletModel.IsHardwareWallet)
+			{
+				errors.Add(ErrorSeverity.Error, "Silent payments are not possible with hardware wallets.");
+				return;
+			}
 		}
 
 		if (IsPayJoin && _walletModel.IsHardwareWallet)
@@ -401,11 +405,6 @@ public partial class SendViewModel : RoutableViewModel
 		}
 
 		_suggestionLabels.Activate(disposables);
-
-		_exchangeRateUpdater.WhenAnyValue(x => x.UsdExchangeRate)
-			.ObserveOn(RxApp.MainThreadScheduler)
-			.Subscribe(x => ExchangeRate = x)
-			.DisposeWith(disposables);
 
 		RxApp.MainThreadScheduler.Schedule(async () => await OnAutoPasteAsync());
 

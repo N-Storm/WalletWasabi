@@ -53,12 +53,12 @@ public class ArenaClientTests
 		var alice = new Alice(coin, new OwnershipProof(), round, Guid.NewGuid());
 		round.Alices.Add(alice);
 
-		using Arena arena = await ArenaBuilder.From(config).CreateAndStartAsync(round);
+		var rpc = WabiSabiFactory.CreatePreconfiguredRpcClient();
+		using Arena arena = await ArenaBuilder.From(config).With(rpc).CreateAndStartAsync(round);
 
 		using var memoryCache = new MemoryCache(new MemoryCacheOptions());
 		var idempotencyRequestCache = new IdempotencyRequestCache(memoryCache);
-		using CoinJoinFeeRateStatStore coinJoinFeeRateStatStore = new("FeeRateStatSore.txt", config, arena.Rpc);
-		var wabiSabiApi = new WabiSabiController(idempotencyRequestCache, arena, coinJoinFeeRateStatStore);
+		var wabiSabiApi = new WabiSabiController(idempotencyRequestCache, arena);
 
 		var apiClient = new ArenaClient(null!, null!, config.CoordinatorIdentifier, wabiSabiApi);
 
@@ -91,13 +91,13 @@ public class ArenaClientTests
 		Alice alice2 = WabiSabiFactory.CreateAlice(coins[1].Coin, coins[1].OwnershipProof, round: round);
 		round.Alices.Add(alice2);
 
-		using Arena arena = await ArenaBuilder.From(config).CreateAndStartAsync(round);
+		var rpc = WabiSabiFactory.CreatePreconfiguredRpcClient();
+		using Arena arena = await ArenaBuilder.From(config).With(rpc).CreateAndStartAsync(round);
 
 		using var memoryCache = new MemoryCache(new MemoryCacheOptions());
 		var idempotencyRequestCache = new IdempotencyRequestCache(memoryCache);
 
-		using CoinJoinFeeRateStatStore coinJoinFeeRateStatStore = new("FeeRateStatSore.txt", config, arena.Rpc);
-		var wabiSabiApi = new WabiSabiController(idempotencyRequestCache, arena, coinJoinFeeRateStatStore);
+		var wabiSabiApi = new WabiSabiController(idempotencyRequestCache, arena);
 
 		InsecureRandom rnd = InsecureRandom.Instance;
 		var amountClient = new WabiSabiClient(round.AmountCredentialIssuerParameters, rnd, 4300000000000L);
@@ -178,8 +178,7 @@ public class ArenaClientTests
 		using var memoryCache = new MemoryCache(new MemoryCacheOptions());
 		var idempotencyRequestCache = new IdempotencyRequestCache(memoryCache);
 
-		using CoinJoinFeeRateStatStore coinJoinFeeRateStatStore = new("FeeRateStatSore.txt", config, arena.Rpc);
-		var wabiSabiApi = new WabiSabiController(idempotencyRequestCache, arena, coinJoinFeeRateStatStore);
+		var wabiSabiApi = new WabiSabiController(idempotencyRequestCache, arena);
 
 		var roundState = RoundState.FromRound(round);
 		var aliceArenaClient = new ArenaClient(

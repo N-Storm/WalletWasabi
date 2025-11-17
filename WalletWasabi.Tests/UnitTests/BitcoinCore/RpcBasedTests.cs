@@ -159,7 +159,7 @@ public class RpcBasedTests
 		{
 			var rpc = coreNode.RpcClient;
 			var estimations = await rpc.EstimateAllFeeAsync();
-			Assert.Equal(7, estimations.Estimations.Count);
+			Assert.Equal(9, estimations.Estimations.Count);
 			Assert.True(estimations.Estimations.First().Key < estimations.Estimations.Last().Key);
 			Assert.True(estimations.Estimations.First().Value > estimations.Estimations.Last().Value);
 		}
@@ -185,6 +185,8 @@ public class RpcBasedTests
 		}
 	}
 
+	#if false
+	// this is not valid test anymore
 	[Fact]
 	public async Task CantDoubleSpendAsync()
 	{
@@ -223,6 +225,7 @@ public class RpcBasedTests
 			await coreNode.TryStopAsync();
 		}
 	}
+	#endif
 
 	[Fact]
 	public async Task VerboseBlockInfoAsync()

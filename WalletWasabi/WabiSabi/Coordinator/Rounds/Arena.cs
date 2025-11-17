@@ -12,6 +12,7 @@ using WalletWasabi.Bases;
 using WalletWasabi.BitcoinRpc;
 using WalletWasabi.Crypto.Randomness;
 using WalletWasabi.Extensions;
+using WalletWasabi.FeeRateEstimation;
 using WalletWasabi.Logging;
 using WalletWasabi.WabiSabi.Coordinator.DoSPrevention;
 using WalletWasabi.WabiSabi.Coordinator.Models;
@@ -28,37 +29,36 @@ public partial class Arena : PeriodicRunner
 		IRPCClient rpc,
 		Prison prison,
 		RoundParameterFactory roundParameterFactory,
+		FeeRateProvider feeRateProvider,
 		CoinJoinScriptStore? coinJoinScriptStore = null,
 		TimeSpan? period = null
 		) : base(period ?? TimeSpan.FromSeconds(2))
 	{
 		_config = config;
-		Rpc = rpc;
+		_rpc = rpc;
 		_prison = prison;
-		CoinJoinScriptStore = coinJoinScriptStore;
+		_coinJoinScriptStore = coinJoinScriptStore;
 		_roundParameterFactory = roundParameterFactory;
-		MaxSuggestedAmountProvider = new(_config);
+		_feeRateProvider = feeRateProvider;
+		_maxSuggestedAmountProvider = new(_config);
 	}
 
-	public event EventHandler<Transaction>? CoinJoinBroadcast;
-
 	public HashSet<Round> Rounds { get; } = new();
-	public ImmutableList<RoundState> RoundStates { get; private set; } = ImmutableList<RoundState>.Empty;
-	internal ConcurrentQueue<uint256> DisruptedRounds { get; } = new();
+	private ImmutableList<RoundState> _roundStates = ImmutableList<RoundState>.Empty;
+	private readonly ConcurrentQueue<uint256> _disruptedRounds = new();
 	private readonly AsyncLock _asyncLock = new();
 	private readonly WabiSabiConfig _config;
-	internal IRPCClient Rpc { get; }
+	private readonly IRPCClient _rpc;
 	private readonly Prison _prison;
-	public CoinJoinScriptStore? CoinJoinScriptStore { get; }
+	private readonly CoinJoinScriptStore? _coinJoinScriptStore;
 	private readonly RoundParameterFactory _roundParameterFactory;
-	public MaxSuggestedAmountProvider MaxSuggestedAmountProvider { get; }
+	private readonly FeeRateProvider _feeRateProvider;
+	private readonly MaxSuggestedAmountProvider _maxSuggestedAmountProvider;
 
 	protected override async Task ActionAsync(CancellationToken cancel)
 	{
-		var before = DateTimeOffset.UtcNow;
 		using (await _asyncLock.LockAsync(cancel).ConfigureAwait(false))
 		{
-			var beforeInside = DateTimeOffset.UtcNow;
 			TimeoutRounds();
 
 			TimeoutAlices();
@@ -93,7 +93,7 @@ public partial class Arena : PeriodicRunner
 						.ThenBy(x => x.InputCount)
 						.ToList();
 
-		RoundStates = rounds.Select(r => RoundState.FromRound(r, stateId: 0)).ToImmutableList();
+		_roundStates = rounds.Select(r => RoundState.FromRound(r, stateId: 0)).ToImmutableList();
 	}
 
 	private async Task StepInputRegistrationPhaseAsync(CancellationToken cancel)
@@ -120,13 +120,13 @@ public partial class Arena : PeriodicRunner
 						continue;
 					}
 
-					MaxSuggestedAmountProvider.StepMaxSuggested(round, false);
+					_maxSuggestedAmountProvider.StepMaxSuggested(round, false);
 					EndRound(round, EndRoundState.AbortedNotEnoughAlices);
 					round.LogInfo($"Not enough inputs ({round.InputCount}) in {nameof(Phase.InputRegistration)} phase. The minimum is ({round.Parameters.MinInputCountByRound}). {nameof(round.Parameters.MaxSuggestedAmount)} was '{round.Parameters.MaxSuggestedAmount}' BTC.");
 				}
 				else if (round.IsInputRegistrationEnded(round.Parameters.MaxInputCountByRound))
 				{
-					MaxSuggestedAmountProvider.StepMaxSuggested(round, true);
+					_maxSuggestedAmountProvider.StepMaxSuggested(round, true);
 					SetRoundPhase(round, Phase.ConnectionConfirmation);
 				}
 			}
@@ -241,7 +241,7 @@ public partial class Arena : PeriodicRunner
 					round.CoordinatorScript = GetCoordinatorScriptPreventReuse(round);
 					coinjoin = AddCoordinationFee(round, coinjoin, round.CoordinatorScript);
 
-					round.CoinjoinState = FinalizeTransaction(round.Id, coinjoin);
+					round.CoinjoinState = FinalizeTransaction(coinjoin);
 
 					if (!allReady && phaseExpired)
 					{
@@ -279,7 +279,6 @@ public partial class Arena : PeriodicRunner
 					Coin[] spentCoins = round.CoinjoinState.Inputs.ToArray();
 					Money networkFee = coinjoin.GetFee(spentCoins);
 					round.LogInfo($"Network Fee: {networkFee.ToString(false, false)} BTC.");
-					uint256 roundId = round.Id;
 					FeeRate feeRate = coinjoin.GetFeeRate(spentCoins);
 					round.LogInfo($"Network Fee Rate: {feeRate.SatoshiPerByte} sat/vByte.");
 					round.LogInfo($"Desired Fee Rate: {round.Parameters.MiningFeeRate.SatoshiPerByte} sat/vByte.");
@@ -287,7 +286,7 @@ public partial class Arena : PeriodicRunner
 					// Added for monitoring reasons.
 					try
 					{
-						FeeRate targetFeeRate = (await Rpc.EstimateConservativeSmartFeeAsync((int)_config.ConfirmationTarget, cancellationToken).ConfigureAwait(false)).FeeRate;
+						var targetFeeRate = await GetFeeRateEstimationAsync(cancellationToken).ConfigureAwait(false);
 						round.LogInfo($"Current Fee Rate on the Network: {targetFeeRate.SatoshiPerByte} sat/vByte. Confirmation target is: {(int)_config.ConfirmationTarget} blocks.");
 					}
 					catch (Exception ex)
@@ -309,7 +308,7 @@ public partial class Arena : PeriodicRunner
 						$"There are {indistinguishableOutputs.Count(x => x.count == 1)} occurrences of unique outputs.");
 
 					// Broadcasting.
-					await Rpc.SendRawTransactionAsync(coinjoin, cancellationToken).ConfigureAwait(false);
+					await _rpc.SendRawTransactionAsync(coinjoin, cancellationToken).ConfigureAwait(false);
 					EndRound(round, EndRoundState.TransactionBroadcasted);
 					round.LogInfo($"Successfully broadcast the coinjoin: {coinjoin.GetHash()}.");
 
@@ -321,7 +320,7 @@ public partial class Arena : PeriodicRunner
 
 					foreach (var address in coinjoin.Outputs
 						.Select(x => x.ScriptPubKey)
-						.Where(script => CoinJoinScriptStore?.Contains(script) is true))
+						.Where(script => _coinJoinScriptStore?.Contains(script) is true))
 					{
 						if (address == round.CoordinatorScript)
 						{
@@ -334,8 +333,7 @@ public partial class Arena : PeriodicRunner
 						}
 					}
 
-					CoinJoinScriptStore?.AddRange(coinjoin.Outputs.Select(x => x.ScriptPubKey));
-					CoinJoinBroadcast?.Invoke(this, coinjoin);
+					_coinJoinScriptStore?.AddRange(coinjoin.Outputs.Select(x => x.ScriptPubKey));
 				}
 				else if (round.TransactionSigningTimeFrame.HasExpired)
 				{
@@ -367,10 +365,10 @@ public partial class Arena : PeriodicRunner
 	{
 		foreach (var chunkOfAlices in round.Alices.ToList().ChunkBy(16))
 		{
-			var batchedRpc = Rpc.PrepareBatch();
+			var batchedRpc = _rpc.PrepareBatch();
 
 			var aliceCheckingTaskPairs = chunkOfAlices
-				.Select(x => (Alice: x, StatusTask: Rpc.GetTxOutAsync(x.Coin.Outpoint.Hash, (int)x.Coin.Outpoint.N, includeMempool: true, cancellationToken)))
+				.Select(x => (Alice: x, StatusTask: _rpc.GetTxOutAsync(x.Coin.Outpoint.Hash, (int)x.Coin.Outpoint.N, includeMempool: true, cancellationToken)))
 				.ToList();
 
 			await batchedRpc.SendBatchAsync(cancellationToken).ConfigureAwait(false);
@@ -454,7 +452,7 @@ public partial class Arena : PeriodicRunner
 		// This indicates to the client that there will be a blame round.
 		EndRound(round, EndRoundState.NotAllAlicesSign);
 
-		var feeRate = (await Rpc.EstimateConservativeSmartFeeAsync((int)_config.ConfirmationTarget, cancellationToken).ConfigureAwait(false)).FeeRate;
+		FeeRate feeRate = await GetFeeRateEstimationAsync(cancellationToken).ConfigureAwait(false);
 		var blameWhitelist = round.Alices
 			.Select(x => x.Coin.Outpoint)
 			.Where(x => !_prison.IsBanned(x, _config.GetDoSConfiguration(), DateTimeOffset.UtcNow))
@@ -472,110 +470,17 @@ public partial class Arena : PeriodicRunner
 
 	private async Task CreateRoundsAsync(CancellationToken cancellationToken)
 	{
-		FeeRate? feeRate = null;
-
-		// Have rounds to split the volume around minimum input counts if load balance is required.
-		// Only do things if the load balancer compatibility is configured.
-		if (_config.WW200CompatibleLoadBalancing)
-		{
-			foreach (var round in Rounds.Where(x =>
-				x.Phase == Phase.InputRegistration
-				&& x is not BlameRound
-				&& !x.IsInputRegistrationEnded(x.Parameters.MaxInputCountByRound)
-				&& x.InputCount >= _config.RoundDestroyerThreshold).ToArray())
-			{
-				feeRate = (await Rpc.EstimateConservativeSmartFeeAsync((int)_config.ConfirmationTarget, cancellationToken).ConfigureAwait(false)).FeeRate;
-
-				var allInputs = round.Alices.Select(y => y.Coin.Amount).OrderBy(x => x).ToArray();
-
-				// 0.75 to bias towards larger numbers as larger input owners often have many smaller inputs too.
-				var smallSuggestion = allInputs.Skip((int)(allInputs.Length * _config.WW200CompatibleLoadBalancingInputSplit)).First();
-				var largeSuggestion = round.Parameters.AllowedInputAmounts.Max;
-
-				var roundWithoutThis = Rounds.Except(new[] { round });
-				RoundParameters parameters = _roundParameterFactory.CreateRoundParameter(feeRate, largeSuggestion);
-				Round? foundLargeRound = roundWithoutThis
-					.FirstOrDefault(x =>
-									x.Phase == Phase.InputRegistration
-									&& x is not BlameRound
-									&& !x.IsInputRegistrationEnded(round.Parameters.MaxInputCountByRound)
-									&& x.Parameters.MaxSuggestedAmount >= allInputs.Max()
-									&& x.InputRegistrationTimeFrame.Remaining > TimeSpan.FromSeconds(60));
-				var largeRound = foundLargeRound ?? TryMineRound(parameters, roundWithoutThis.ToArray());
-
-				if (largeRound is not null)
-				{
-					parameters = _roundParameterFactory.CreateRoundParameter(feeRate, smallSuggestion);
-					var smallRound = TryMineRound(parameters, roundWithoutThis.Concat(new[] { largeRound }).ToArray());
-
-					// If creation is successful, only then destroy the round.
-					if (smallRound is not null)
-					{
-						AddRound(largeRound);
-						AddRound(smallRound);
-
-						if (foundLargeRound is null)
-						{
-							largeRound.LogInfo($"Mined round with parameters: {nameof(largeRound.Parameters.MaxSuggestedAmount)}:'{largeRound.Parameters.MaxSuggestedAmount}' BTC.");
-						}
-						smallRound.LogInfo($"Mined round with parameters: {nameof(smallRound.Parameters.MaxSuggestedAmount)}:'{smallRound.Parameters.MaxSuggestedAmount}' BTC.");
-
-						// If it can't create the large round, then don't abort.
-						EndRound(round, EndRoundState.AbortedLoadBalancing);
-						Logger.LogInfo($"Destroyed round with {allInputs.Length} inputs. Threshold: {_config.RoundDestroyerThreshold}");
-					}
-				}
-			}
-		}
-
 		// Add more rounds if not enough.
 		var registrableRoundCount = Rounds.Count(x => x is not BlameRound && x.Phase == Phase.InputRegistration && x.InputRegistrationTimeFrame.Remaining > TimeSpan.FromMinutes(1));
 		int roundsToCreate = _config.RoundParallelization - registrableRoundCount;
 		for (int i = 0; i < roundsToCreate; i++)
 		{
-			feeRate ??= (await Rpc.EstimateConservativeSmartFeeAsync((int)_config.ConfirmationTarget, cancellationToken).ConfigureAwait(false)).FeeRate;
-			RoundParameters parameters = _roundParameterFactory.CreateRoundParameter(feeRate, MaxSuggestedAmountProvider.MaxSuggestedAmount);
+			FeeRate feeRate = await GetFeeRateEstimationAsync(cancellationToken).ConfigureAwait(false);
+			RoundParameters parameters = _roundParameterFactory.CreateRoundParameter(feeRate, _maxSuggestedAmountProvider.MaxSuggestedAmount);
 
 			var r = new Round(parameters, SecureRandom.Instance);
 			AddRound(r);
 			r.LogInfo($"Created round with parameters: {nameof(r.Parameters.MaxSuggestedAmount)}:'{r.Parameters.MaxSuggestedAmount}' BTC.");
-		}
-	}
-
-	private Round? TryMineRound(RoundParameters parameters, Round[] rounds)
-	{
-		// Huge HACK to keep it compatible with WW2.0.0 client version, which's
-		// round preference is based on the ordering of ToImmutableDictionary.
-		// Add round until ToImmutableDictionary orders it to be the first round
-		// so old clients will prefer that one.
-		IOrderedEnumerable<Round>? orderedRounds;
-		Round r;
-		var before = DateTimeOffset.UtcNow;
-		var times = 0;
-		var maxCycleTimes = 300;
-		do
-		{
-			var roundsCopy = rounds.ToList();
-			r = new Round(parameters, SecureRandom.Instance);
-			roundsCopy.Add(r);
-			orderedRounds = roundsCopy
-				.Where(x => x.Phase == Phase.InputRegistration && x is not BlameRound && !x.IsInputRegistrationEnded(x.Parameters.MaxInputCountByRound))
-				.OrderBy(x => x.Parameters.MaxSuggestedAmount)
-				.ThenBy(x => x.InputCount);
-			times++;
-		}
-		while (times <= maxCycleTimes && orderedRounds.ToImmutableDictionary(x => x.Id, x => x).First().Key != r.Id);
-
-		Logger.LogDebug($"First ordered round creator did {times} cycles.");
-
-		if (times > maxCycleTimes)
-		{
-			r.LogInfo("First ordered round creation too expensive. Skipping...");
-			return null;
-		}
-		else
-		{
-			return r;
 		}
 	}
 
@@ -656,14 +561,9 @@ public partial class Arena : PeriodicRunner
 		Rounds.Add(round);
 	}
 
-	public void AbortRound(uint256 roundId)
-	{
-		DisruptedRounds.Enqueue(roundId);
-	}
-
 	private void AbortDisruptedRounds()
 	{
-		while (DisruptedRounds.TryDequeue(out var disruptedRoundId))
+		while (_disruptedRounds.TryDequeue(out var disruptedRoundId))
 		{
 			var roundOrNull = Rounds.FirstOrDefault(x => x.Id == disruptedRoundId);
 			if (roundOrNull is { } nonNullRound)
@@ -684,10 +584,16 @@ public partial class Arena : PeriodicRunner
 		round.EndRound(endRoundState);
 	}
 
-	private SigningState FinalizeTransaction(uint256 roundId, ConstructionState constructionState)
+	private SigningState FinalizeTransaction(ConstructionState constructionState)
 	{
 		SigningState signingState = constructionState.Finalize();
 		return signingState;
+	}
+
+	private async Task<FeeRate> GetFeeRateEstimationAsync(CancellationToken cancellationToken)
+	{
+		var feeEstimations = await _feeRateProvider(cancellationToken).ConfigureAwait(false);
+		return feeEstimations.GetFeeRate((int)_config.ConfirmationTarget);
 	}
 
 	/// <summary>

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using NBitcoin;
@@ -39,9 +40,9 @@ public static class TransactionFeeHelper
 		throw new InvalidOperationException("Couldn't get the fee estimations.");
 	}
 
-	public static async Task<TimeSpan?> EstimateConfirmationTimeAsync(FeeRateEstimationUpdater feeProvider, Network network, SmartTransaction tx, CpfpInfoProvider? cpfpInfoProvider, CancellationToken cancellationToken)
+	public static async Task<TimeSpan?> EstimateConfirmationTimeAsync(FeeRateEstimations feeRateEstimations, Network network, SmartTransaction tx, CpfpInfoProvider cpfpInfoProvider, CancellationToken cancellationToken)
 	{
-		if (TryGetFeeEstimates(feeProvider, network, out var feeEstimates) && feeEstimates.TryEstimateConfirmationTime(tx, out var estimate))
+		if (TryGetFeeEstimates(feeRateEstimations, network, out var feeEstimates) && feeEstimates.TryEstimateConfirmationTime(tx, out var estimate))
 		{
 			return estimate;
 		}
@@ -51,12 +52,13 @@ public static class TransactionFeeHelper
 			return null;
 		}
 
-		if (cpfpInfoProvider is null || await cpfpInfoProvider.GetCachedCpfpInfoAsync(tx.GetHash(), cancellationToken).ConfigureAwait(false) is not { } cpfpInfo)
+		var availableCpfpInfo = await cpfpInfoProvider.GetCachedCpfpInfoAsync(cancellationToken).ConfigureAwait(false);
+		if (availableCpfpInfo.FirstOrDefault(x => x.Transaction.GetHash() == tx.Transaction.GetHash()) is not { } entry)
 		{
 			return null;
 		}
 
-		var feeRate = new FeeRate(cpfpInfo.EffectiveFeePerVSize);
+		var feeRate = new FeeRate(entry.CpfpInfo.EffectiveFeePerVSize);
 		return feeEstimates.EstimateConfirmationTime(feeRate);;
 	}
 
@@ -72,19 +74,23 @@ public static class TransactionFeeHelper
 	}
 
 	public static bool TryGetFeeEstimates(Wallet wallet, [NotNullWhen(true)] out FeeRateEstimations? estimates)
-		=> TryGetFeeEstimates(wallet.FeeRateEstimationUpdater, wallet.Network, out estimates);
+		=> TryGetFeeEstimates(wallet.FeeRateEstimations, wallet.Network, out estimates);
 
-	public static bool TryGetFeeEstimates(FeeRateEstimationUpdater feeProvider, Network network, [NotNullWhen(true)] out FeeRateEstimations? estimates)
+	public static bool TryGetFeeEstimates(FeeRateEstimations? feeRateEstimations, Network network, [NotNullWhen(true)] out FeeRateEstimations? estimates)
 	{
-		estimates = null;
-
-		if (feeProvider.FeeEstimates is null)
+		if (network == Network.TestNet)
 		{
-			return false;
+			estimates = TestNetFeeRateEstimations;
+			return true;
+		}
+		if (feeRateEstimations is not null)
+		{
+			estimates = feeRateEstimations;
+			return true;
 		}
 
-		estimates = network == Network.TestNet ? TestNetFeeRateEstimations : feeProvider.FeeEstimates;
-		return true;
+		estimates = null;
+		return false;
 	}
 
 	public static TimeSpan CalculateConfirmationTime(double targetBlock)
