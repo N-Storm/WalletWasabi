@@ -327,8 +327,7 @@ public class KeyManager
 			throw new FileNotFoundException($"Wallet file not found at: `{filePath}`.");
 		}
 
-		SafeIoManager safeIoManager = new(filePath);
-		string jsonString = safeIoManager.ReadAllText(Encoding.UTF8);
+		string jsonString = SafeFile.ReadAllText(filePath, Encoding.UTF8);
 
 		KeyManager km = JsonDecoder.FromString(jsonString, Decoder)
 			?? throw new DataException($"Wallet file at: `{filePath}` is not a valid wallet file or it is corrupted.");
@@ -687,8 +686,7 @@ public class KeyManager
 
 		IoHelpers.EnsureContainingDirectoryExists(filePath);
 
-		SafeIoManager safeIoManager = new(filePath);
-		safeIoManager.WriteAllText(jsonString, Encoding.UTF8);
+		SafeFile.WriteAllText(filePath, jsonString, Encoding.UTF8);
 	}
 
 	#region _blockchainState
@@ -740,25 +738,6 @@ public class KeyManager
 	public void SetIcon(WalletType type)
 	{
 		SetIcon(type.ToString());
-	}
-
-	public void AssertNetworkOrClearBlockState(Network expectedNetwork)
-	{
-		lock (_criticalStateLock)
-		{
-			var lastNetwork = _blockchainState.Network;
-			if (lastNetwork is null || lastNetwork != expectedNetwork)
-			{
-				_blockchainState.Network = expectedNetwork;
-				SetBestHeight(0);
-
-				if (lastNetwork is { })
-				{
-					Logger.LogWarning($"Wallet is opened on {expectedNetwork}. Last time it was opened on {lastNetwork}.");
-				}
-				Logger.LogInfo("Blockchain cache is cleared.");
-			}
-		}
 	}
 
 	#endregion _blockchainState
