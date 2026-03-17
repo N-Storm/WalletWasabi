@@ -160,10 +160,16 @@ for PLATFORM in "${PLATFORMS[@]}"; do
     mv $OUTPUT_DIR/{$BACKEND,${BACKEND_EXECUTABLE_NAME}}$EXE_FILE_EXTENSION
   fi
 
-  # Remove microservices binaries for other platforms
-  MICRO_SERVICES_DIR="$OUTPUT_DIR/Microservices/Binaries"
-  export PLATFORM_MICRO_SERVICES="${PLATFORM:0:3}${PLATFORM: -2}"
-  find $MICRO_SERVICES_DIR -mindepth 1 -maxdepth 1 -type d ! -name "$PLATFORM_MICRO_SERVICES" -exec rm -rf {} +
+  # Remove bundled app binaries for other platforms
+  BUNDLED_APPS_DIR="$OUTPUT_DIR/BundledApps/Binaries"
+
+  if [[ "${PLATFORM_PREFIX}" == "osx" ]]; then
+    # For macOS, the bundled binaries are stored in "osx64" and it supports both x64 and arm64.
+    find $BUNDLED_APPS_DIR -mindepth 1 -maxdepth 1 -type d ! -name "osx64" -exec rm -rf {} +
+  else
+    # For other platforms, the bundled binaries are stored in a folder with the same name as the platform (e.g. linux-x64, linux-arm64 and win-x64).
+    find $BUNDLED_APPS_DIR -mindepth 1 -maxdepth 1 -type d ! -name "$PLATFORM" -exec rm -rf {} +
+  fi
 
   # Hack! *.deps.json files contains this SHA516 that depends on the absolute path of
   # the nuget packages. This means that these files are different in different computers
@@ -183,7 +189,23 @@ for PLATFORM in "${PLATFORMS[@]}"; do
   # Create compressed package files (.zip and .tar.gz)
   PACKAGE_FILE_NAME=$PACKAGE_FILE_NAME_PREFIX-$ALTER_PLATFORM
   if [[ "${PLATFORM_PREFIX}" == "lin" ]]; then
-    tar -pczvf $PACKAGES_DIR/$PACKAGE_FILE_NAME.tar.gz $OUTPUT_DIR
+     if [ -z "$SOURCE_DATE_EPOCH" ]; then
+       export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+     fi
+
+     PARENT_DIR=$(dirname "$OUTPUT_DIR")
+     BASE_NAME=$(basename "$OUTPUT_DIR")
+
+     tar --sort=name \
+         --mtime="@${SOURCE_DATE_EPOCH}" \
+         --owner=0 \
+         --group=0 \
+         --numeric-owner \
+         --transform="s|^$BASE_NAME|WasabiWallet|" \
+         --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
+         -pczf $PACKAGES_DIR/$PACKAGE_FILE_NAME.tar.gz \
+         -C "$PARENT_DIR" \
+         "$BASE_NAME"
   fi
 
   pushd "$OUTPUT_DIR" || exit
@@ -241,7 +263,7 @@ echo "${DEBIAN_CONTROL_FILE_CONTENT}" > $DEBIAN/control
 USR_LOCAL_BIN_DIR="/usr/local/bin"
 INSTALL_DIR="${USR_LOCAL_BIN_DIR}/wasabiwallet"
 DEBIAN_POST_INST_SCRIPT_CONTENT="#!/usr/bin/env sh
-${INSTALL_DIR}/Microservices/Binaries/lin64/hwi installudevrules
+${INSTALL_DIR}/BundledApps/Binaries/linux-x64/hwi installudevrules
 exit 0"
 echo "${DEBIAN_POST_INST_SCRIPT_CONTENT}" > $DEBIAN/postinst
 chmod 0775 ${DEBIAN}/postinst

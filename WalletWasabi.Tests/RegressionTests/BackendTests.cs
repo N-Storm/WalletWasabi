@@ -2,6 +2,7 @@ using NBitcoin;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Mime;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -47,15 +48,11 @@ public class BackendTests : IClassFixture<RegTestFixture>
 		var utxos = await rpc.ListUnspentAsync();
 		var utxo = utxos[0];
 		var tx = await rpc.GetRawTransactionAsync(utxo.OutPoint.Hash);
-		using StringContent content = new($"'{tx.ToHex()}'", Encoding.UTF8, "application/json");
-
-		Logger.TurnOff();
+		using StringContent content = new($"'{tx.ToHex()}'", Encoding.UTF8, MediaTypeNames.Application.Json);
 
 		using var response = await BackendApiHttpClient.PostAsync($"api/v{Constants.BackendMajorVersion}/btc/blockchain/broadcast", content);
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		Assert.Equal("Transaction is already in the blockchain.", await response.Content.ReadAsJsonAsync(Decode.String));
-
-		Logger.TurnOn();
 	}
 
 	[Fact]
@@ -63,17 +60,13 @@ public class BackendTests : IClassFixture<RegTestFixture>
 	{
 		await using RegTestSetup setup = await RegTestSetup.InitializeTestEnvironmentAsync(RegTestFixture);
 
-		using StringContent content = new($"''", Encoding.UTF8, "application/json");
-
-		Logger.TurnOff();
+		using StringContent content = new($"''", Encoding.UTF8, MediaTypeNames.Application.Json);
 
 		using var response = await BackendApiHttpClient.PostAsync($"api/v{Constants.BackendMajorVersion}/btc/blockchain/broadcast", content);
 
 		Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 		Assert.Contains("The hex field is required.", await response.Content.ReadAsStringAsync());
-
-		Logger.TurnOn();
 	}
 
 	[Fact]
@@ -81,7 +74,9 @@ public class BackendTests : IClassFixture<RegTestFixture>
 	{
 		await using RegTestSetup setup = await RegTestSetup.InitializeTestEnvironmentAsync(RegTestFixture);
 		IRPCClient rpc = setup.RpcClient;
+#pragma warning disable CA2000 // Dispose objects before losing scope - service is stopped in finally block
 		IndexBuilderService indexBuilderService = new(rpc, "filters.txt");
+#pragma warning restore CA2000
 		var startIndexingService = indexBuilderService.StartAsync(CancellationToken.None);
 		try
 		{

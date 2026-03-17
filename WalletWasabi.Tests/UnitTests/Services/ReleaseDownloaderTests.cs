@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using WalletWasabi.Services;
+using WalletWasabi.Tests.UnitTests.Mocks;
 using WalletWasabi.WebClients;
 using Xunit;
 
@@ -11,7 +12,7 @@ namespace WalletWasabi.Tests.UnitTests.Services;
 public class ReleaseDownloaderTests
 {
 	[Fact]
-	public async Task OfficiallySupportedOSes()
+	public async Task OfficiallySupportedOSesAsync()
 	{
 		var (sha256sums, sha256sumsAsc, sha256sumsWasabiSig)  = CreateSha256SumsFiles();
 

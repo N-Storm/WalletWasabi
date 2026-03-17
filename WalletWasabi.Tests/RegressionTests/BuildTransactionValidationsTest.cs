@@ -57,7 +57,8 @@ public class BuildTransactionValidationsTest : IClassFixture<RegTestFixture>
 
 		// 3. Create wasabi synchronizer service.
 		var filterProvider = new WebApiFilterProvider(10_000, RegTestFixture.IndexerHttpClientFactory,  setup.EventBus);
-		using var synchronizer = Spawn("Synchronizer", Continuously(Synchronizer.CreateFilterGenerator(filterProvider, bitcoinStore, setup.EventBus)));
+		var (_, _, serviceLoop) = Continuously(Synchronizer.CreateFilterGenerator(filterProvider, bitcoinStore, setup.EventBus));
+		using var synchronizer = Spawn("Synchronizer", serviceLoop);
 
 		// 4. Create key manager service.
 		var keyManager = KeyManager.CreateNew(out _, password, network);
@@ -83,8 +84,6 @@ public class BuildTransactionValidationsTest : IClassFixture<RegTestFixture>
 			new DestinationRequest(scp, Money.Satoshis(long.MaxValue)),
 			new DestinationRequest(scp, Money.Satoshis(long.MaxValue)),
 			new DestinationRequest(scp, Money.Satoshis(5))));
-
-		Logger.TurnOff();
 
 		// toSend cannot have a zero element
 		Assert.Throws<ArgumentException>(() => wallet.BuildTransaction("", new PaymentIntent(Array.Empty<DestinationRequest>()), FeeStrategy.SevenDaysConfirmationTargetStrategy));
@@ -177,8 +176,6 @@ public class BuildTransactionValidationsTest : IClassFixture<RegTestFixture>
 					new DestinationRequest(scp, MoneyRequest.CreateAllRemaining()),
 					new DestinationRequest(scp, MoneyRequest.CreateAllRemaining())),
 				FeeStrategy.TwentyMinutesConfirmationTargetStrategy));
-
-			Logger.TurnOn();
 
 			operations = new PaymentIntent(scp, Money.Coins(0.5m));
 			btx = wallet.BuildTransaction(password, operations, FeeStrategy.TwentyMinutesConfirmationTargetStrategy);

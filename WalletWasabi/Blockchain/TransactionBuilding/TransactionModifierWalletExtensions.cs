@@ -128,7 +128,9 @@ public static class TransactionModifierWalletExtensions
 		var keyManager = wallet.KeyManager;
 		var network = wallet.Network;
 
-		var bestFeeRate = preferredFeeRate ?? wallet.FeeRateEstimations.GetFeeRate(2);
+		var bestFeeRate = preferredFeeRate
+						  ?? wallet.FeeRateEstimations?.GetFeeRate(2)
+						  ?? throw new InvalidOperationException("Cannot get fee estimations.");
 		Guard.NotNull(nameof(bestFeeRate), bestFeeRate);
 
 		var txSizeBytes = transactionToSpeedUp.Transaction.GetVirtualSize();
@@ -288,9 +290,9 @@ public static class TransactionModifierWalletExtensions
 		Guard.NotNull(nameof(destination), destination);
 
 		// Request the unconfirmed transaction chain so we can extract the fee paid by tx + all the ancestors still unconfirmed.
-		using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-		using var lts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, cancellationToken);
-		var cpfpInfoResult = await wallet.CpfpInfoProvider.GetCpfpInfoAsync(transactionToCpfp, lts.Token).ConfigureAwait(false);
+		// The HTTP request has its own 120-second timeout, so we don't impose an additional timeout here.
+		// The caller can cancel via the cancellationToken parameter if needed.
+		var cpfpInfoResult = await wallet.CpfpInfoProvider.GetCpfpInfoAsync(transactionToCpfp, cancellationToken).ConfigureAwait(false);
 
 		var cpfpInfo = cpfpInfoResult.Match(
 			v => v,

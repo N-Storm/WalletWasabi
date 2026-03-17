@@ -1,15 +1,13 @@
+using NBitcoin;
 using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using NBitcoin;
 using WalletWasabi.Bases;
 using WalletWasabi.Extensions;
 using WalletWasabi.Helpers;
 using WalletWasabi.Logging;
-using WalletWasabi.Services;
 using WalletWasabi.Services.Terminate;
-using WalletWasabi.Userfacing;
 using Constants = WalletWasabi.Helpers.Constants;
 
 namespace WalletWasabi.Daemon;
@@ -17,60 +15,63 @@ namespace WalletWasabi.Daemon;
 public class WasabiApplication
 {
 	public WasabiAppBuilder AppConfig { get; }
-	public Global? Global { get; private set; }
+	public Global Global { get; }
 	public Config Config { get; }
 	public SingleInstanceChecker SingleInstanceChecker { get; }
 	public TerminateService TerminateService { get; }
+	private static Guid InstanceGuid { get; } = Guid.NewGuid();
 
 	public WasabiApplication(WasabiAppBuilder wasabiAppBuilder)
 	{
 		AppConfig = wasabiAppBuilder;
 
+		CheckVersionAndHelp();
 		Directory.CreateDirectory(Config.DataDir);
 		Config = new Config(LoadOrCreateConfigs(), wasabiAppBuilder.Arguments);
-
 		SetupLogger();
 		Logger.LogDebug($"Wasabi was started with these argument(s): {string.Join(" ", AppConfig.Arguments.DefaultIfEmpty("none"))}.");
-		SingleInstanceChecker = new(Config.Network);
+
+		Global = new Global(Config.DataDir, Config);
+		SingleInstanceChecker = new(Config.DataDir);
 		TerminateService = new(TerminateApplicationAsync, AppConfig.Terminate);
 	}
 
-	public async Task<ExitCode> RunAsync(Func<Task> afterStarting)
+	private void CheckVersionAndHelp()
 	{
 		if (AppConfig.Arguments.Contains("--version"))
 		{
 			Console.WriteLine($"{AppConfig.AppName} {Constants.ClientVersion}");
-			return ExitCode.Ok;
+			Environment.Exit((int)ExitCode.Ok);
 		}
+
 		if (AppConfig.Arguments.Contains("--help") || AppConfig.Arguments.Contains("-h"))
 		{
 			ShowHelp();
-			return ExitCode.Ok;
+			Environment.Exit((int)ExitCode.Ok);
 		}
 
-		if (AppConfig.MustCheckSingleInstance)
+	}
+
+	public ExitCode Run(Action afterStarting)
+	{
+		var exitCode = ProcessAppArguments();
+		if (exitCode is not null)
 		{
-			var instanceResult = await SingleInstanceChecker.CheckSingleInstanceAsync();
-			if (instanceResult == WasabiInstanceStatus.AnotherInstanceIsRunning)
-			{
-				Logger.LogDebug("Wasabi is already running, signaled the first instance.");
-				return ExitCode.FailedAlreadyRunningSignaled;
-			}
-			if (instanceResult == WasabiInstanceStatus.Error)
-			{
-				Logger.LogCritical($"Wasabi is already running, but cannot be signaled");
-				return ExitCode.FailedAlreadyRunningError;
-			}
+			return exitCode.Value;
 		}
 
 		try
 		{
 			TerminateService.Activate();
-
 			BeforeStarting();
 
-			await afterStarting();
+			afterStarting();
 			return ExitCode.Ok;
+		}
+		catch (Exception e)
+		{
+			Logger.LogInfo("Exception occurred while the application was starting or running", e);
+			throw;
 		}
 		finally
 		{
@@ -78,14 +79,55 @@ public class WasabiApplication
 		}
 	}
 
+	public async Task<ExitCode> RunAsync(Func<Task> afterStarting)
+	{
+		var exitCode = ProcessAppArguments();
+		if (exitCode is not null)
+		{
+			return exitCode.Value;
+		}
+
+		try
+		{
+			TerminateService.Activate();
+			BeforeStarting();
+
+			await afterStarting();
+			return ExitCode.Ok;
+		}
+		catch (Exception e)
+		{
+			Logger.LogInfo("Exception occurred while the application was starting or running", e);
+			throw;
+		}
+		finally
+		{
+			BeforeStopping();
+		}
+	}
+
+	private ExitCode? ProcessAppArguments()
+	{
+		if (AppConfig.MustCheckSingleInstance)
+		{
+			var isFirst = SingleInstanceChecker.IsFirstInstance();
+
+			if (!isFirst)
+			{
+				Logger.LogCritical($"Wasabi is already running. Please stop the other instance first.");
+				return ExitCode.FailedAlreadyRunningError;
+			}
+		}
+
+		return null;
+	}
+
 	private void BeforeStarting()
 	{
 		AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
 		TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
 
-		Logger.LogSoftwareStarted(AppConfig.AppName);
-
-		Global = CreateGlobal();
+		Logger.LogInfo($"{AppConfig.AppName} started ({InstanceGuid}).", callerFilePath: "", callerLineNumber: -1);
 	}
 
 	private void BeforeStopping()
@@ -96,11 +138,8 @@ public class WasabiApplication
 		// Start termination/disposal of the application.
 		TerminateService.Terminate();
 		SingleInstanceChecker.Dispose();
-		Logger.LogSoftwareStopped(AppConfig.AppName);
+		Logger.LogInfo($"{AppConfig.AppName} stopped gracefully ({InstanceGuid}).", callerFilePath: "", callerLineNumber: -1);
 	}
-
-	private Global CreateGlobal()
-		=> new(Config.DataDir, Config);
 
 	private PersistentConfig LoadOrCreateConfigs()
 	{
@@ -108,17 +147,43 @@ public class WasabiApplication
 		MigrateConfigFiles();
 
 		var networkFilePath = Path.Combine(Config.DataDir, "network");
-		Config.GetCliArgsValue("network", AppConfig.Arguments, out var networkName);
-		networkName ??= File.ReadAllText(networkFilePath).Trim();
-		var network = Network.GetNetwork(networkName ?? "mainnet");
+		Logger.LogInfo($"Loading network file '{networkFilePath}'.");
+
+		Network? network;
+		var networkFileExists = File.Exists(networkFilePath);
+		if (Config.GetCliArgsValue("network", AppConfig.Arguments, out var networkName))
+		{
+			network = Network.GetNetwork(networkName) ?? Network.Main;
+			if (!networkFileExists)
+			{
+				PersistentConfigManager.UpdateNetwork(networkFilePath, network);
+			}
+		}
+		else
+		{
+			if (networkFileExists)
+			{
+				networkName = File.ReadAllText(networkFilePath).Trim();
+				network = Network.GetNetwork(networkName) ?? Network.Main;
+			}
+			else
+			{
+				network = Network.Main;
+				PersistentConfigManager.UpdateNetwork(networkFilePath, network);
+			}
+		}
+
 		var configFileName = networkName switch
 		{
 			_ when network == Network.Main => "Config.json",
-			_ when network == Network.TestNet =>  "Config.TestNet.json",
-			_ when network == Network.RegTest =>  "Config.RegTest.json",
+			_ when network == Network.TestNet => "Config.TestNet.json",
+			_ when network == Network.RegTest => "Config.RegTest.json",
+			_ when network == Bitcoin.Instance.Signet => "Config.Signet.json",
 			_ => throw new NotSupportedException($"Network '{networkName}' is not supported."),
 		};
 		var configFilePath = Path.Combine(Config.DataDir, configFileName);
+
+		Logger.LogInfo($"Loading config file '{configFilePath}'.");
 		var persistentConfig = PersistentConfigManager.LoadFile(configFilePath);
 
 		if (persistentConfig is PersistentConfig config)
@@ -136,6 +201,8 @@ public class WasabiApplication
 			PersistentConfigManager.DefaultRegTestConfig);
 		CreateConfigFileIfNotExists(Path.Combine(Config.DataDir, "Config.TestNet.json"),
 			PersistentConfigManager.DefaultTestNetConfig);
+		CreateConfigFileIfNotExists(Path.Combine(Config.DataDir, "Config.Signet.json"),
+			PersistentConfigManager.DefaultSignetConfig);
 		CreateConfigFileIfNotExists(Path.Combine(Config.DataDir, "Config.json"),
 			PersistentConfigManager.DefaultMainNetConfig);
 		return;
@@ -181,16 +248,18 @@ public class WasabiApplication
 				IndexerUri : oldConfig.MainNetIndexerUri,
 				TorBridges : new ValueList<string>(oldConfig.TorBridges),
 				MaxCoinJoinMiningFeeRate : oldConfig.MaxCoinJoinMiningFeeRate,
-				MaxDaysInMempool: oldConfig.MaxDaysInMempool
+				MaxDaysInMempool: oldConfig.MaxDaysInMempool,
+				ExperimentalFeatures: ValueList<string>.Empty
 			);
 
 			var testConfig = mainConfig with
 			{
-				Network	= Network.TestNet,
+				Network = Network.TestNet,
 				IndexerUri = oldConfig.TestNetIndexerUri,
 				CoordinatorUri = oldConfig.TestNetCoordinatorUri,
 				BitcoinRpcCredentialString = oldConfig.TestNetBitcoinRpcCredentialString,
 				BitcoinRpcUri = oldConfig.TestNetBitcoinRpcEndPoint.ToUriString("http"),
+				ExperimentalFeatures = new ValueList<string>(["scripting"])
 			};
 
 			var regtestConfig = mainConfig with
@@ -200,6 +269,7 @@ public class WasabiApplication
 				CoordinatorUri = oldConfig.RegTestCoordinatorUri,
 				BitcoinRpcCredentialString = oldConfig.RegTestBitcoinRpcCredentialString,
 				BitcoinRpcUri = oldConfig.RegTestBitcoinRpcEndPoint.ToUriString("http"),
+				ExperimentalFeatures = new ValueList<string>(["scripting"])
 			};
 
 			var regtestConfigFilePath = Path.Combine(Config.DataDir, "Config.RegTest.json");
@@ -228,12 +298,9 @@ public class WasabiApplication
 
 	private async Task TerminateApplicationAsync()
 	{
-		Logger.LogSoftwareStopped(AppConfig.AppName);
+		Logger.LogInfo($"{AppConfig.AppName} stopped gracefully ({InstanceGuid}).", callerFilePath: "", callerLineNumber: -1);
 
-		if (Global is { } global)
-		{
-			await global.DisposeAsync().ConfigureAwait(false);
-		}
+		await Global.DisposeAsync().ConfigureAwait(false);
 	}
 
 	private void SetupLogger()

@@ -13,6 +13,7 @@ using WalletWasabi.Helpers;
 using WalletWasabi.Logging;
 using WalletWasabi.Models;
 using WalletWasabi.WabiSabi.Client;
+using static WalletWasabi.Logging.LoggerTools;
 
 namespace WalletWasabi.Wallets;
 
@@ -52,7 +53,7 @@ public class WalletManager : IWalletProvider
 	/// <remarks>All access must be guarded by <see cref="_lock"/> object.</remarks>
 	private readonly HashSet<Wallet> _wallets = new();
 
-	private readonly object _lock = new();
+	private readonly Lock _lock = new();
 	private readonly AsyncLock _startStopWalletLock = new();
 
 	private bool IsInitialized { get; set; }
@@ -187,9 +188,9 @@ public class WalletManager : IWalletProvider
 		{
 			try
 			{
-				Logger.LogInfo($"Starting wallet '{wallet.WalletName}'...");
+				Logger.LogInfo(FormatLog("Starting wallet...", wallet));
 				await wallet.StartAsync(_cancelAllTasksToken).ConfigureAwait(false);
-				Logger.LogInfo($"Wallet '{wallet.WalletName}' started.");
+				Logger.LogInfo(FormatLog("Wallet started.", wallet));
 				_cancelAllTasksToken.ThrowIfCancellationRequested();
 				return wallet;
 			}
@@ -286,14 +287,14 @@ public class WalletManager : IWalletProvider
 					if (wallet.Loaded)
 					{
 						await wallet.StopAsync(cancel).ConfigureAwait(false);
-						Logger.LogInfo($"'{wallet.WalletName}' wallet is stopped.");
+						Logger.LogInfo(FormatLog("is stopped.", wallet));
 					}
 
 					wallet.Dispose();
 				}
 				catch (Exception ex)
 				{
-					Logger.LogError(ex);
+					Logger.LogError(FormatLog(ex.ToString(), wallet));
 				}
 			}
 		}
@@ -312,23 +313,6 @@ public class WalletManager : IWalletProvider
 		}
 	}
 
-	public IEnumerable<SmartCoin> CoinsByOutPoint(OutPoint input)
-	{
-		lock (_lock)
-		{
-			var res = new List<SmartCoin>();
-			foreach (var wallet in _wallets.Where(x => x.Loaded))
-			{
-				if (wallet.Coins.TryGetByOutPoint(input, out var coin))
-				{
-					res.Add(coin);
-				}
-			}
-
-			return res;
-		}
-	}
-
 	public void Initialize()
 	{
 		IsInitialized = true;
@@ -338,7 +322,7 @@ public class WalletManager : IWalletProvider
 	{
 		foreach (var km in GetWallets().Select(x => x.KeyManager).Where(x => x.GetNetwork() == Network))
 		{
-			km.SetMaxBestHeight(new Height(bestHeight));
+			km.SetMaxBestHeight(bestHeight);
 		}
 	}
 

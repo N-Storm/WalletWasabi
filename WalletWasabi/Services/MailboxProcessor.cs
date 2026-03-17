@@ -32,7 +32,7 @@ public class Mailbox<TMsg>
 }
 
 public delegate Task Process<TMsg>(Mailbox<TMsg> mailbox, CancellationToken cancellationToken);
-public delegate Task<TState> MessageHandler<TMsg,TState>(TMsg msg, TState state, CancellationToken cancellationToken);
+public delegate Task<TState> MessageHandler<TMsg, TState>(TMsg msg, TState state, CancellationToken cancellationToken);
 public delegate Task<Unit> MessageHandler<TMsg>(TMsg msg, CancellationToken cancellationToken);
 
 public sealed class MailboxProcessor<TMsg>(
@@ -92,7 +92,8 @@ public sealed class MailboxProcessor<TMsg>(
 				"It was not possible to write into an Unbounded channel, something that should always succeed."));
 		}
 
-		return tcs.Task.WaitAsync(cancellationToken);
+		var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, CancellationToken);
+		return tcs.Task.WaitAsync(cts.Token);
 	}
 
 	public void Dispose()
@@ -169,25 +170,67 @@ public static class Workers
 		return false;
 	}
 
-	public static Process<Unit> Continuously(
-		MessageHandler<Unit> handler) =>
-		async (mailbox, cancellationToken) =>
+	public static (Func<Task>, Func<Task>, Process<Unit>) Continuously(MessageHandler<Unit> handler)
+	{
+		SemaphoreSlim? currentSemaphore = null;
+
+		async Task LoopAsync(Mailbox<Unit> mailbox, CancellationToken cancellationToken)
 		{
-			while (!cancellationToken.IsCancellationRequested)
+			var semaphore = new SemaphoreSlim(1, 1);
+			Volatile.Write(ref currentSemaphore, semaphore);
+
+			using (var disposable = semaphore)
 			{
-				try
+				while (!cancellationToken.IsCancellationRequested)
 				{
-					_ = await handler(Unit.Instance, cancellationToken).ConfigureAwait(false);
-				}
-				catch (Exception e) when (e is not OperationCanceledException oce ||
-				                          oce.CancellationToken != cancellationToken)
-				{
-					Logger.LogError(e);
+					try
+					{
+						await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+						semaphore.Release();
+
+						_ = await handler(Unit.Instance, cancellationToken).ConfigureAwait(false);
+					}
+					catch (OperationCanceledException)
+					{
+						// Ignore because it is expected.
+					}
+					catch (Exception e)
+					{
+						Logger.LogError(e);
+					}
 				}
 			}
-		};
 
-	public static Process<TMsg> EventDriven<TMsg,TState>(TState state,
+			Volatile.Write(ref currentSemaphore, null);
+		}
+
+		async Task PauseAsync()
+		{
+			var semaphore = Volatile.Read(ref currentSemaphore);
+
+			if (semaphore is not null)
+			{
+				await semaphore.WaitAsync().ConfigureAwait(false);
+			}
+		}
+
+		Task ResumeAsync()
+		{
+			var semaphore = Volatile.Read(ref currentSemaphore);
+
+			if (semaphore is not null && semaphore.CurrentCount == 0)
+			{
+				semaphore.Release();
+			}
+
+			return Task.CompletedTask;
+		}
+
+
+		return (PauseAsync, ResumeAsync, LoopAsync);
+	}
+
+	public static Process<TMsg> EventDriven<TMsg, TState>(TState state,
 		MessageHandler<TMsg, TState> handler) =>
 		async (mailbox, cancellationToken) =>
 		{
@@ -198,14 +241,18 @@ public static class Workers
 					var msg = await mailbox.ReceiveAsync(cancellationToken).ConfigureAwait(false);
 					state = await handler(msg, state, cancellationToken).ConfigureAwait(false);
 				}
-				catch (Exception e) when(e is not ChannelClosedException)
+				catch (OperationCanceledException)
+				{
+					// Ignore because it is expected
+				}
+				catch (Exception e) when (e is not ChannelClosedException)
 				{
 					Logger.LogError(e);
 				}
 			}
 		};
 
-	public static Process<TMsg> Periodically<TMsg,TState>(TimeSpan period, TState state,
+	public static Process<TMsg> Periodically<TMsg, TState>(TimeSpan period, TState state,
 		MessageHandler<TMsg, TState> handler) =>
 		async (inbox, cancellationToken) =>
 		{
@@ -220,6 +267,10 @@ public static class Workers
 						state = await handler(msg, state, cancellationToken).ConfigureAwait(false);
 						lastUpdateTime = DateTime.UtcNow;
 					}
+				}
+				catch (OperationCanceledException)
+				{
+					// Ignore because it is expected
 				}
 				catch (Exception e) when (e is not ChannelClosedException)
 				{
@@ -245,7 +296,7 @@ public static class Workers
 			{
 				await handler(mailbox, cancellationToken).ConfigureAwait(false);
 			}
-			catch (Exception e) when (e is not (ChannelClosedException or TaskCanceledException))
+			catch (Exception e) when (e is not ChannelClosedException)
 			{
 				Logger.LogError($"Service will stopped because of unexpected exception: {e}");
 			}

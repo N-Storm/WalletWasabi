@@ -1,7 +1,6 @@
+using System;
 using System.IO;
 using NBitcoin;
-using System.Net;
-using System.Text.Json;
 using WalletWasabi.Bases;
 using WalletWasabi.Exceptions;
 using WalletWasabi.Helpers;
@@ -22,6 +21,7 @@ public class Config : ConfigBase
 		string mainNetBitcoinRpcUri,
 		string testNetBitcoinRpcUri,
 		string regTestBitcoinRpcUri,
+		string signetBitcoinRpcUri,
 		string filterType)
 
 	: base(filePath)
@@ -32,6 +32,7 @@ public class Config : ConfigBase
 		MainNetBitcoinRpcUri = Guard.NotNull(nameof(mainNetBitcoinRpcUri), mainNetBitcoinRpcUri);
 		TestNetBitcoinRpcUri = Guard.NotNull(nameof(testNetBitcoinRpcUri), testNetBitcoinRpcUri);
 		RegTestBitcoinRpcUri = Guard.NotNull(nameof(regTestBitcoinRpcUri), regTestBitcoinRpcUri);
+		SignetBitcoinRpcUri = Guard.NotNull(nameof(signetBitcoinRpcUri), signetBitcoinRpcUri);
 
 		FilterType = filterType;
 	}
@@ -44,6 +45,8 @@ public class Config : ConfigBase
 
 	public string RegTestBitcoinRpcUri { get; } = Constants.DefaultRegTestBitcoinRpcUri;
 
+	public string SignetBitcoinRpcUri { get; } = Constants.DefaultSignetBitcoinRpcUri;
+
 	public string BitcoinRpcConnectionString { get; } = "user:password";
 
 	public string FilterType { get; } = Constants.DefaultFilterType;
@@ -54,6 +57,7 @@ public class Config : ConfigBase
 			_ when Network == Network.Main => MainNetBitcoinRpcUri,
 			_ when Network == Network.TestNet => TestNetBitcoinRpcUri,
 			_ when Network == Network.RegTest => RegTestBitcoinRpcUri,
+			_ when Network == Bitcoin.Instance.Signet => SignetBitcoinRpcUri,
 			_ => throw new NotSupportedNetworkException(Network)
 		};
 

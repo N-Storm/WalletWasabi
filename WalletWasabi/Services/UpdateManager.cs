@@ -9,9 +9,9 @@ using System.Threading.Tasks;
 using NBitcoin;
 using NBitcoin.Crypto;
 using NNostr.Client;
+using WalletWasabi.BundledApps;
 using WalletWasabi.Helpers;
 using WalletWasabi.Logging;
-using WalletWasabi.Microservices;
 using WalletWasabi.WebClients;
 using static WalletWasabi.Services.UpdateManager;
 
@@ -39,7 +39,12 @@ public static class UpdateManager
 		{
 			// Connect to Nostr relays and check for release version updates
 			await wasabiNostrClient.ConnectAnsSubscribeAsync(cancellationToken).ConfigureAwait(false);
-			await ProcessReleaseEventsAsync(wasabiNostrClient, releaseDownloader, eventBus, cancellationToken).ConfigureAwait(false);
+			await ProcessReleaseEventsAsync(wasabiNostrClient, releaseDownloader, eventBus, cancellationToken)
+				.ConfigureAwait(false);
+		}
+		catch (AggregateException e)
+		{
+			Logger.LogWarning($"It was not possible to check for updates. {e.Message}");
 		}
 		finally
 		{
@@ -94,7 +99,7 @@ public static class UpdateManager
 // Downloads and verifies new software releases
 public static class ReleaseDownloader
 {
-	private static readonly UserAgentPicker _userAgentGetter = UserAgent.GenerateUserAgentPicker(false);
+	private static readonly UserAgentPicker UserAgentGetter = UserAgent.GenerateUserAgentPicker(false);
 
 	public static AsyncReleaseDownloader ForOfficiallySupportedOSes(IHttpClientFactory httpClientFactory, EventBus eventBus) =>
 		(releaseInfo, cancellationToken) => DownloadNewWasabiReleaseVersionAsync(httpClientFactory, eventBus, releaseInfo, cancellationToken);
@@ -181,8 +186,9 @@ public static class ReleaseDownloader
 
 		async Task<string> GetExpectedInstallerHashAsync()
 		{
-			var lines = await File.ReadAllLinesAsync(sha256SumsTask.Result, cancellationToken).ConfigureAwait(false);
+			var lines = await File.ReadAllLinesAsync(sha256SumsAscTask.Result, cancellationToken).ConfigureAwait(false);
 			var s = lines.Select(l => l.Split("  ./", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+				.Where(a => a.Length == 2)
 				.Select(a => (Hash: a[0], FileName: a[1]))
 				.FirstOrDefault(a => a.FileName == installerFileName)
 				.Hash ?? throw new InvalidOperationException($"{installerFileName} was not found.");
@@ -201,12 +207,12 @@ public static class ReleaseDownloader
 	{
 		File.Delete(filePath);
 		var httpClient = httpClientFactory.CreateClient($"{uri.Host}-installers");
-		httpClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", _userAgentGetter());
+		httpClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", UserAgentGetter());
 		using var request = new HttpRequestMessage(HttpMethod.Get, uri);
 		var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 		response.EnsureSuccessStatusCode();
 		var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-		await using var fileStream = new FileStream(filePath, FileMode.Create);
+		using var fileStream = new FileStream(filePath, FileMode.Create);
 		await contentStream.CopyToAsync(fileStream, cancellationToken).ConfigureAwait(false);
 		return filePath;
 	}

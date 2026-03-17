@@ -1,6 +1,7 @@
 using NBitcoin;
 using NBitcoin.Protocol;
 using NBitcoin.Protocol.Behaviors;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
@@ -16,13 +17,24 @@ public class P2pBehavior : NodeBehavior
 {
 	private const int MaxInvSize = 50000;
 
+	private static readonly ConcurrentDictionary<Node, FeeRate> PeerFeeFilters = new();
+
 	public P2pBehavior(MempoolService mempoolService)
 	{
 		MempoolService = Guard.NotNull(nameof(mempoolService), mempoolService);
 	}
 
-	public event EventHandler<Transaction>? OnTransactionArrived;
 	public MempoolService MempoolService { get; }
+
+	public static FeeRate? GetMinPeerFeeFilter() =>
+		PeerFeeFilters.Select(x => x.Value).MinOrDefault();
+
+	public static Node[] GetNodesWillingToRelay(FeeRate feeRate) =>
+		PeerFeeFilters
+			.Where(x => x.Key.IsConnected)
+			.Where(x => x.Value <= feeRate)
+			.Select(x => x.Key)
+			.ToArray();
 
 	protected override void AttachCore()
 	{
@@ -32,6 +44,7 @@ public class P2pBehavior : NodeBehavior
 	protected override void DetachCore()
 	{
 		AttachedNode.MessageReceived -= AttachedNode_MessageReceivedAsync;
+		PeerFeeFilters.TryRemove(AttachedNode, out _);
 	}
 
 	private async void AttachedNode_MessageReceivedAsync(Node node, IncomingMessage message)
@@ -45,6 +58,10 @@ public class P2pBehavior : NodeBehavior
 			else if (message.Message.Payload is TxPayload txPayload)
 			{
 				ProcessTx(txPayload);
+			}
+			else if (message.Message.Payload is FeeFilterPayload feeFilterPayload)
+			{
+				PeerFeeFilters[node] = feeFilterPayload.FeeRate;
 			}
 			else if (message.Message.Payload is InvPayload invPayload)
 			{
@@ -130,7 +147,6 @@ public class P2pBehavior : NodeBehavior
 	{
 		Transaction transaction = payload.Object;
 		transaction.PrecomputeHash(false, true);
-		OnTransactionArrived.SafeInvoke(this, transaction);
 		MempoolService.Process(transaction);
 	}
 

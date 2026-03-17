@@ -4,16 +4,17 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   outputs = { self, nixpkgs }:
     let
-        pkgs = import nixpkgs { system = "x86_64-linux"; };
+        pkgs = import nixpkgs { system = "x86_64-linux"; config.permittedInsecurePackages = ["python3.13-ecdsa-0.19.1"]; };
+        pkgsUnfree = import nixpkgs { system = "x86_64-linux"; config.permittedInsecurePackages = ["python3.13-ecdsa-0.19.1"]; config.allowUnfree = true; };
         deployScript = pkgs.writeScriptBin "deploy" (builtins.readFile ./Contrib/deploy.sh);
         gitRev = if (builtins.hasAttr "rev" self) then self.rev else "dirty";
         buildWasabiModule = pkgs.buildDotnetModule {
           pname = "wasabi";
           version = "2.0.0-${builtins.substring 0 8 (self.lastModifiedDate or self.lastModified or "19700101")}-${gitRev}";
-          nugetDeps = ./deps.nix; # nix build .#packages.x86_64-linux.all.passthru.fetch-deps
+          nugetDeps = ./deps.json; # nix build .#packages.x86_64-linux.all.passthru.fetch-deps
           dotnetFlags = [ "-p:CommitHash=${gitRev}"];
-          dotnet-sdk = pkgs.dotnetCorePackages.sdk_8_0;
-          dotnet-runtime = pkgs.dotnetCorePackages.aspnetcore_8_0;
+          dotnet-sdk = pkgs.dotnetCorePackages.sdk_10_0;
+          dotnet-runtime = pkgs.dotnetCorePackages.aspnetcore_10_0;
 
           src = ./.;
         };
@@ -34,7 +35,7 @@
           pname = "WalletWasabi";
           projectFile = [
              "WalletWasabi.Backend/WalletWasabi.Backend.csproj"
-             "WalletWasabi.Backend/WalletWasabi.Coordinator.csproj"
+             "WalletWasabi.Coordinator/WalletWasabi.Coordinator.csproj"
              "WalletWasabi.Fluent.Desktop/WalletWasabi.Fluent.Desktop.csproj"];
           executables = [
             "WalletWasabi.Backend"
@@ -48,23 +49,27 @@
           # Testing
           doCheck = true;
           testProjectFile = "WalletWasabi.Tests/WalletWasabi.Tests.csproj";
-          dotnetTestFlags = ["--filter \"FullyQualifiedName~UnitTests\"" "--logger \"console;verbosity=detailed\""];
+          dotnetTestFlags = ["--filter \"FullyQualifiedName~UnitTests\"" "--logger \"console\""];
+
+          # Disable parallel builds to avoid Avalonia resource file locking issues
+          enableParallelBuilding = false;
 
           # wrap manually, because we want not so ugly executable names
           dontDotnetFixup = true;
 
           preFixup = ''
             wrapDotnetProgram $out/lib/${pname}/WalletWasabi.Fluent.Desktop $out/bin/wasabi
-            wrapDotnetProgram $out/lib/${pname}/WalletWasabi.Backend $out/bin/wbend
+            wrapDotnetProgram $out/lib/${pname}/WalletWasabi.Backend $out/bin/wasabi-indexer
+            wrapDotnetProgram $out/lib/${pname}/WalletWasabi.Coordinator $out/bin/wasabi-coordinator
           '';
 
-          binaries = "Microservices/Binaries/lin64";
-          microservices = "./WalletWasabi/${binaries}";
-          microservicesTest = "./WalletWasabi.Tests/${binaries}";
+          binaries = "BundledApps/Binaries/linux-x64";
+          bundledApps = "./WalletWasabi/${binaries}";
+          bundledAppsTest = "./WalletWasabi.Tests/${binaries}";
           preBuild = ''
-            cp -r ${pkgs.tor}/bin/tor ${microservices}/Tor/tor
-            cp ${pkgs.hwi}/bin/hwi ${microservices}/hwi
-            cp ${pkgs.bitcoind}/bin/bitcoind ${microservicesTest}/bitcoind
+            cp -r ${pkgs.tor}/bin/tor ${bundledApps}/Tor/tor
+            cp ${pkgs.hwi}/bin/hwi ${bundledApps}/hwi
+            cp ${pkgs.bitcoind}/bin/bitcoind ${bundledAppsTest}/bitcoind
           '';
         });
 
@@ -74,7 +79,7 @@
           nugetName = "dotnet-trace";
           version = "8.0.510501";
           nugetSha256 = "sha256-Kt5x8n5Q0T+BaTVufhsyjXbi/BlGKidb97DWSbI6Iq8=";
-          dotnet-sdk = pkgs.dotnetCorePackages.sdk_8_0;
+          dotnet-sdk = pkgs.dotnetCorePackages.sdk_10_0;
         };
         # dotnet dump
         dotnet-dump = pkgs.buildDotnetGlobalTool {
@@ -82,7 +87,7 @@
           nugetName = "dotnet-dump";
           version = "8.0.510501";
           nugetSha256 = "sha256-H7Z4EA/9G3DvVuXbnQJF7IJMEB2SkzRjTAL3eZMqCpI=";
-          dotnet-sdk = pkgs.dotnetCorePackages.sdk_8_0;
+          dotnet-sdk = pkgs.dotnetCorePackages.sdk_10_0;
         };
         # dotnet counters
         dotnet-counters = pkgs.buildDotnetGlobalTool {
@@ -90,28 +95,68 @@
           nugetName = "dotnet-counters";
           version = "8.0.510501";
           nugetSha256 = "sha256-gAexbRzKP/8VPhFy2OqnUCp6ze3CkcWLYR1nUqG71PI=";
-          dotnet-sdk = pkgs.dotnetCorePackages.sdk_8_0;
+          dotnet-sdk = pkgs.dotnetCorePackages.sdk_10_0;
         };
-        wasabi-shell = pkgs.mkShell {
-           name = "wasabi-shell";
-           packages = [
-             pkgs.dotnetCorePackages.sdk_8_0
-             dotnet-trace
-             dotnet-dump
-             dotnet-counters
-             ];
 
-           shellHook = ''
-             export DOTNET_CLI_TELEMETRY_OPTOUT=1
-             export DOTNET_NOLOGO=1
-             export DOTNET_ROOT=${pkgs.dotnetCorePackages.sdk_8_0}
-             export PS1='\n\[\033[1;34m\][Wasabi:\w]\$\[\033[0m\] '
-           '';
+        wasabi-shell =
+          with {
+            libs = with pkgs; [
+              xorg.libX11
+              xorg.libXrandr
+              xorg.libX11.dev
+              xorg.libICE
+              xorg.libSM
+              pkgs.zlib
+              fontconfig.lib
+            ];
+            skiaSharp=toString ./. + "/WalletWasabi.Fluent.Desktop/bin/Debug/net10.0/runtimes/linux-x64/native";
+          };
+          pkgs.mkShell {
+            name = "wasabi-shell";
+            buildInputs = libs;
+            packages = [
+              pkgs.dotnetCorePackages.sdk_10_0
+
+              # tools
+              dotnet-trace
+              dotnet-dump
+              dotnet-counters
+
+              # dependencies
+              pkgs.bitcoind
+              pkgs.tor
+              pkgs.hwi
+
+              # IDE
+              pkgsUnfree.jetbrains.rider
+
+              # Claude code
+              pkgsUnfree.claude-code
+              pkgs.python314 # claude loves python
+           ];
+
+            DOTNET_CLI_TELEMETRY_OPTOUT = 1;
+            DOTNET_NOLOGO = 1;
+            DOTNET_ROOT = "${pkgs.dotnetCorePackages.sdk_10_0}";
+            DOTNET_GLOBAL_TOOLS_PATH = "${builtins.getEnv "HOME"}/.dotnet/tools";
+            #DOTNET_ROLL_FORWARD = "latestPatch";
+            LD_LIBRARY_PATH = "${skiaSharp};${pkgs.lib.makeLibraryPath libs}";
+            BUNDLED_APPS_BINARIES_PATH = "WalletWasabi/BundledApps/Binaries/linux-x64";
+            BUNDLED_APPS_TEST_BINARIES_PATH = "WalletWasabi.Tests/BundledApps/Binaries/linux-x64";
+
+            shellHook = ''
+              export PATH="$PATH:$DOTNET_GLOBAL_TOOLS_PATH"
+              cp $(which tor) "$BUNDLED_APPS_BINARIES_PATH/Tor/"
+              cp $(which hwi) "$BUNDLED_APPS_BINARIES_PATH/hwi"
+              cp $(which bitcoind) "$BUNDLED_APPS_TEST_BINARIES_PATH/"
+
+              export PS1='\n\[\033[1;34m\][Wasabi:\w]\$\[\033[0m\] '
+            '';
         };
         migrateBackendFilters = {
            type = "app";
            program = "${(pkgs.writeShellScript "migrateBackendFilters" ''
-              ${pkgs.dotnetCorePackages.sdk_8_0}/bin/dotnet fsi ${./.}/Contrib/Migration/migrateBackendFilters.fsx;
+              ${pkgs.dotnetCorePackages.sdk_10_0}/bin/dotnet fsi ${./.}/Contrib/Migration/migrateBackendFilters.fsx;
               '')}";
         };
     in

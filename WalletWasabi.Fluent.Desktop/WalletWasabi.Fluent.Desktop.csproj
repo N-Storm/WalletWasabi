@@ -1,12 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
-
-	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-		<OutputType>Exe</OutputType>
-	</PropertyGroup>
-
-	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
-		<OutputType>WinExe</OutputType>
-	</PropertyGroup>
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<DisableImplicitNamespaceImports>true</DisableImplicitNamespaceImports>
@@ -14,7 +6,15 @@
 		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 		<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
 		<DisableImplicitNuGetFallbackFolder>true</DisableImplicitNuGetFallbackFolder>
-		<PathMap>$(MSBuildProjectDirectory)\=WalletWasabi.Fluent.Desktop</PathMap>
+		<RuntimeIdentifiers>win-x64;linux-x64;linux-arm64;osx-x64;osx-arm64</RuntimeIdentifiers>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+		<OutputType>Exe</OutputType>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+		<OutputType>WinExe</OutputType>
 	</PropertyGroup>
 
 	<PropertyGroup>
@@ -42,7 +42,7 @@
 	</ItemGroup>
 	<ItemGroup>
 		<PackageReference Include="Avalonia.Desktop" />
-		<PackageReference Include="Avalonia.ReactiveUI" />
+		<PackageReference Include="ReactiveUI.Avalonia" />
 	</ItemGroup>
 	<ItemGroup>
 		<ProjectReference Include="..\WalletWasabi.Fluent\WalletWasabi.Fluent.csproj" />

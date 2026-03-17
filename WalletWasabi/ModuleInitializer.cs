@@ -6,7 +6,9 @@ using System.Runtime.CompilerServices;
 
 class ModuleInitializer
 {
+#pragma warning disable CA2255 // The 'ModuleInitializer' attribute should not be used in libraries -- Moving this initializer to the apps did not work (https://github.com/WalletWasabi/WalletWasabi/pull/14364).
 	[ModuleInitializer]
+#pragma warning restore CA2255 // The 'ModuleInitializer' attribute should not be used in libraries
 	internal static void PatchTestNet()
 	{
 		// This is necessary to force the static members to be initialized
@@ -23,7 +25,7 @@ class ModuleInitializer
 		// Get the internal dictionary
 		var networks = networksField!.GetValue(bitcoinInstance) as ConcurrentDictionary<ChainName, Network>;
 
-		var testnet4 = networks[new ChainName("testnet4")];
+		var testnet4 = networks![new ChainName("testnet4")];
 
 		// Replaces testnet by testnet4 network
 		networks[new ChainName("testnet")] = testnet4;
@@ -32,7 +34,7 @@ class ModuleInitializer
 			.GetField("_OtherAliases", BindingFlags.NonPublic | BindingFlags.Static);
 
 		var otherAliases = otherAliasesField!.GetValue(null) as ConcurrentDictionary<string, Network>;
-		otherAliases["test"] = testnet4;
+		otherAliases!["test"] = testnet4;
 		otherAliases["testnet"] = testnet4;
 	}
 }
