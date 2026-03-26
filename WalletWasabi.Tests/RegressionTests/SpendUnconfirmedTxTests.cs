@@ -59,8 +59,7 @@ public class SpendUnconfirmedTxTests : IClassFixture<RegTestFixture>
 		node.Behaviors.Add(bitcoinStore.CreateUntrustedP2pBehavior());
 
 		// 3. Create wasabi synchronizer service.
-		var httpClientFactory = RegTestFixture.IndexerHttpClientFactory;
-		var filterProvider = new WebApiFilterProvider(10_000, httpClientFactory, setup.EventBus);
+		var filterProvider = new BitcoinRpcFilterProvider(setup.RpcClient);
 		var (_, _, serviceLoop) = Continuously(Synchronizer.CreateFilterGenerator(filterProvider, bitcoinStore, setup.EventBus));
 		using var synchronizer = Spawn("Synchronizer", serviceLoop);
 
@@ -76,7 +75,6 @@ public class SpendUnconfirmedTxTests : IClassFixture<RegTestFixture>
 
 		var walletFactory = Wallet.CreateFactory(network, bitcoinStore, serviceConfiguration, blockProvider, setup.EventBus, setup.CpfpInfoProvider);
 		WalletManager walletManager = new(network, workDir, new WalletDirectories(network, workDir), walletFactory);
-		walletManager.Initialize();
 
 		// Get some money, make it confirm.
 		var key = keyManager.GetNextReceiveKey("foo label");

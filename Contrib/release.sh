@@ -29,11 +29,10 @@ SHORT_VERSION=${VERSION:0:${#VERSION}-2}
 
 # Define project names
 DESKTOP="WalletWasabi.Fluent.Desktop"
-BACKEND="WalletWasabi.Backend"
 COORDINATOR="WalletWasabi.Coordinator"
 DAEMON="WalletWasabi.Daemon"
+DAEMON_PROJECT="./$DAEMON/$DAEMON.csproj"
 DESKTOP_PROJECT="./$DESKTOP/$DESKTOP.csproj"
-BACKEND_PROJECT="./$BACKEND/$BACKEND.csproj"
 COORDINATOR_PROJECT="./$COORDINATOR/$COORDINATOR.csproj"
 
 # Build directory
@@ -42,7 +41,6 @@ BUILD_DIR="$ROOT_DIR/build"
 
 # Executable name
 EXECUTABLE_NAME="wassabee"
-BACKEND_EXECUTABLE_NAME="wbackend"
 COORDINATOR_EXECUTABLE_NAME="wcoordinator"
 
 # Directory where to save the generated packages
@@ -68,7 +66,7 @@ if [ "$1" = "wininstaller" ]; then
   PACKAGE_COORDINATOR="no"
 elif [ "$1" = "debian" ]; then
   # Supported platforms
-  PLATFORMS=("linux-x64")
+  PLATFORMS=("linux-x64" "linux-arm64")
   CREATE_WINDOWS_INSTALLER="no"
   CREATE_DEBIAN_PACKAGE="yes"
   RELEASE_NOTE="no"
@@ -118,9 +116,9 @@ for PLATFORM in "${PLATFORMS[@]}"; do
   OUTPUT_DIR=$BUILD_DIR/$PLATFORM
 
   if [[ "$PACKAGE_COORDINATOR" == "yes" ]]; then
-    PROJECTS_TO_BUILD=("$DESKTOP_PROJECT" "$BACKEND_PROJECT" "$COORDINATOR_PROJECT" )
+    PROJECTS_TO_BUILD=("$DAEMON_PROJECT" "$DESKTOP_PROJECT" "$COORDINATOR_PROJECT" )
   else
-    PROJECTS_TO_BUILD=("$DESKTOP_PROJECT" )
+    PROJECTS_TO_BUILD=("$DAEMON_PROJECT" "$DESKTOP_PROJECT" )
   fi
 
   for PROJECT in "${PROJECTS_TO_BUILD[@]}"; do
@@ -157,7 +155,6 @@ for PLATFORM in "${PLATFORMS[@]}"; do
   mv $OUTPUT_DIR/{$DAEMON,${EXECUTABLE_NAME}d}$EXE_FILE_EXTENSION
   if [[ "$PACKAGE_COORDINATOR" == "yes" ]]; then
     mv $OUTPUT_DIR/{$COORDINATOR,${COORDINATOR_EXECUTABLE_NAME}}$EXE_FILE_EXTENSION
-    mv $OUTPUT_DIR/{$BACKEND,${BACKEND_EXECUTABLE_NAME}}$EXE_FILE_EXTENSION
   fi
 
   # Remove bundled app binaries for other platforms
@@ -220,10 +217,26 @@ done
 #------------------------------------------------------------------------------------#
 if [ "$CREATE_DEBIAN_PACKAGE" = "yes" ]; then
 # Create .deb package
-DEBIAN_PACKAGE_DIR=$BUILD_DIR/deb
+
+for DEBIAN_ZIP_PACKAGE in $PACKAGES_DIR/Wasabi*linux*.zip; do
+
+# Combine paths
+CURRENT_ARCH=$(echo "$DEBIAN_ZIP_PACKAGE" | grep -o 'arm64\|x64')
+ZIP_PACKAGE=$(basename "$DEBIAN_ZIP_PACKAGE")
+
+DEBIAN_PACKAGE_DIR=$BUILD_DIR/$ZIP_PACKAGE/deb
 DEBIAN=$DEBIAN_PACKAGE_DIR/DEBIAN
 DEBIAN_USR=$DEBIAN_PACKAGE_DIR/usr
 DEBIAN_BIN=$DEBIAN_USR/local/bin
+
+DEBIAN_ARCH_NAME=""
+DEBIAN_FULL_PLATFORM_NAME="linux-x64"
+
+if [ "$CURRENT_ARCH" = "arm64" ]; then
+  DEBIAN_ARCH_NAME="-arm64"
+  DEBIAN_FULL_PLATFORM_NAME="linux-arm64"
+fi
+
 
 # Create necessary directories
 mkdir -p $DEBIAN
@@ -239,7 +252,7 @@ for ICON_FILE in ./Contrib/Assets/WasabiLogo*.png; do
 done
 
 # Calculate package size (in kilobytes)
-DEBIAN_PACKAGE_SIZE=$(du -s $BUILD_DIR/linux-x64 | cut -f1)
+DEBIAN_PACKAGE_SIZE=$(du -s "${BUILD_DIR}/${DEBIAN_FULL_PLATFORM_NAME}" | cut -f1)
 
 # Create the control file content
 DEBIAN_CONTROL_FILE_CONTENT="Package: ${EXECUTABLE_NAME}
@@ -263,7 +276,7 @@ echo "${DEBIAN_CONTROL_FILE_CONTENT}" > $DEBIAN/control
 USR_LOCAL_BIN_DIR="/usr/local/bin"
 INSTALL_DIR="${USR_LOCAL_BIN_DIR}/wasabiwallet"
 DEBIAN_POST_INST_SCRIPT_CONTENT="#!/usr/bin/env sh
-${INSTALL_DIR}/BundledApps/Binaries/linux-x64/hwi installudevrules
+${INSTALL_DIR}/BundledApps/Binaries/${DEBIAN_FULL_PLATFORM_NAME}/hwi installudevrules
 exit 0"
 echo "${DEBIAN_POST_INST_SCRIPT_CONTENT}" > $DEBIAN/postinst
 chmod 0775 ${DEBIAN}/postinst
@@ -287,7 +300,7 @@ echo "${DEBIAN_DESKTOP_CONTENT}" > $DEBIAN_DESKTOP
 chmod 0644 $DEBIAN_DESKTOP
 
 # Copy the build to into the debian package structure
-cp -a $BUILD_DIR/linux-x64 $DEBIAN_BIN/wasabiwallet
+cp -a "${BUILD_DIR}/${DEBIAN_FULL_PLATFORM_NAME}" $DEBIAN_BIN/wasabiwallet
 
 # Create wrapper scripts
 echo "#!/usr/bin/env sh
@@ -306,21 +319,18 @@ chmod 0755 ${DEBIAN_BIN}/${EXECUTABLE_NAME}{,d}
 if [[ "$PACKAGE_COORDINATOR" == "yes" ]]; then
   # Create wrapper scripts
   echo "#!/usr/bin/env sh
-  ${INSTALL_DIR}/${BACKEND_EXECUTABLE_NAME} \$@" > ${DEBIAN_BIN}/${BACKEND_EXECUTABLE_NAME}
-
-  echo "#!/usr/bin/env sh
   ${INSTALL_DIR}/${COORDINATOR_EXECUTABLE_NAME} \$@" > ${DEBIAN_BIN}/${COORDINATOR_EXECUTABLE_NAME}
 
   # Remove execution to everything except for executables and their wrapper scripts
-  chmod 0755 ${DEBIAN_BIN}/wasabiwallet/${BACKEND_EXECUTABLE_NAME}
-  chmod 0755 ${DEBIAN_BIN}/${BACKEND_EXECUTABLE_NAME}
   chmod 0755 ${DEBIAN_BIN}/wasabiwallet/${COORDINATOR_EXECUTABLE_NAME}
   chmod 0755 ${DEBIAN_BIN}/${COORDINATOR_EXECUTABLE_NAME}
 
 fi
 
 # Build the .deb package
-dpkg-deb -Zxz --build "${DEBIAN_PACKAGE_DIR}" "$PACKAGES_DIR/${PACKAGE_FILE_NAME_PREFIX}.deb"
+dpkg-deb -Zxz --build "${DEBIAN_PACKAGE_DIR}" "$PACKAGES_DIR/${PACKAGE_FILE_NAME_PREFIX}${DEBIAN_ARCH_NAME}.deb"
+
+done
 fi
 
 #------------------------------------------------------------------------------------#

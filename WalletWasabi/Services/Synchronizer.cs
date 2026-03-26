@@ -1,6 +1,5 @@
 using NBitcoin;
 using NBitcoin.RPC;
-using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -12,94 +11,46 @@ using WalletWasabi.Blockchain.Blocks;
 using WalletWasabi.Helpers;
 using WalletWasabi.Logging;
 using WalletWasabi.Stores;
-using WalletWasabi.WebClients.Wasabi;
-using FiltersResponse = WalletWasabi.WebClients.Wasabi.FiltersResponse;
 
 namespace WalletWasabi.Services;
 
 
 using FilterFetchingResult = Result<FiltersResponse, TimeSpan>;
 
-public interface ICompactFilterProvider
+public abstract record FiltersResponse
 {
-	Task<FilterFetchingResult> GetFiltersAsync(uint256 fromHash, uint fromHeight, CancellationToken cancellationToken);
+	public record AlreadyOnBestBlock : FiltersResponse;
+	public record BestBlockUnknown : FiltersResponse;
+	public record NewFiltersAvailable(uint BestHeight, FilterModel[] Filters) : FiltersResponse;
 }
 
-public class WebApiFilterProvider(int maxFiltersToSync, IHttpClientFactory httpClientFactory, EventBus eventBus) : ICompactFilterProvider
+public class BitcoinRpcFilterProvider(IRPCClient bitcoinRpcClient)
 {
-	private readonly HttpClient _httpClient = httpClientFactory.CreateClient("long-live-satoshi-backend");
+	private static readonly FiltersResponse.AlreadyOnBestBlock AlreadyOnBestBlock = new();
+	private static readonly FiltersResponse.BestBlockUnknown BestBlockUnknown = new();
+	private static FiltersResponse.NewFiltersAvailable NewFiltersAvailable(uint bestHeight, FilterModel[] filters) => new(bestHeight, filters);
 
-	public async Task<FilterFetchingResult> GetFiltersAsync(uint256 fromHash, uint fromHeight, CancellationToken cancellationToken)
-	{
-		var wasabiClient = new IndexerClient(_httpClient, eventBus);
-		var lastUsedApiVersion = IndexerClient.ApiVersion;
-
-		try
-		{
-			return await wasabiClient.GetFiltersAsync(fromHash, maxFiltersToSync, cancellationToken)
-				.ConfigureAwait(false);
-		}
-		catch (HttpRequestException ex)
-		{
-			if (ex.Message.Contains("Not Found"))
-			{
-				// Backend API version might be updated meanwhile. Trying to update the versions.
-				var backendCompatible =
-					await CheckBackendCompatibilityAsync(wasabiClient, cancellationToken).ConfigureAwait(false);
-				if (!backendCompatible)
-				{
-					eventBus.Publish(new IndexerIncompatibilityDetected());
-				}
-
-				// If the backend is compatible and the Api version updated then we just used the wrong API.
-				if (backendCompatible && lastUsedApiVersion != IndexerClient.ApiVersion)
-				{
-					// Next request will be fine, do not throw exception.
-					return FilterFetchingResult.Fail(TimeSpan.Zero);
-				}
-			}
-
-			return FilterFetchingResult.Fail(TimeSpan.FromSeconds(30));
-		}
-	}
-
-	private static async Task<bool> CheckBackendCompatibilityAsync(IndexerClient indexerClient, CancellationToken cancel)
-	{
-		bool backendCompatible;
-		try
-		{
-			backendCompatible = await indexerClient.CheckUpdatesAsync(cancel).ConfigureAwait(false);
-		}
-		catch (HttpRequestException ex) when (ex.Message.Contains("Not Found"))
-		{
-			// Backend is online but the endpoint for versions doesn't exist -> backend is not compatible.
-			backendCompatible = false;
-		}
-
-		return backendCompatible;
-	}
-}
-
-public class BitcoinRpcFilterProvider(IRPCClient bitcoinRpcClient) : ICompactFilterProvider
-{
 	public async Task<FilterFetchingResult> GetFiltersAsync(uint256 fromHash, uint fromHeight, CancellationToken cancellationToken)
 	{
 		try
 		{
-			var filters = new List<FilterModel>();
 			var currentHeight = await bitcoinRpcClient.GetBlockCountAsync(cancellationToken).ConfigureAwait(false);
-			var nbOfFiltersToFetch = Math.Min(1_000, currentHeight - fromHeight);
+			var nbOfFiltersToFetch = Math.Min(100, currentHeight - fromHeight);
 			var stopAtHeight = fromHeight + nbOfFiltersToFetch;
 
 			var realBlockHash = await bitcoinRpcClient.GetBlockHashAsync((int) fromHeight, cancellationToken)
 				.ConfigureAwait(false);
 			if (realBlockHash != fromHash)
 			{
-				return new FiltersResponse.BestBlockUnknown();
+				return BestBlockUnknown;
+			}
+
+			if (stopAtHeight == fromHeight)
+			{
+				return AlreadyOnBestBlock;
 			}
 
 			var heights = Enumerable.Range((int) fromHeight + 1, (int) (stopAtHeight - fromHeight)).ToArray();
-
 			var batchClient = bitcoinRpcClient.PrepareBatch();
 			var blockHashTasks = heights.Select(h => batchClient.GetBlockHashAsync(h, cancellationToken)).ToArray();
 			await batchClient.SendBatchAsync(cancellationToken).ConfigureAwait(false);
@@ -112,26 +63,24 @@ public class BitcoinRpcFilterProvider(IRPCClient bitcoinRpcClient) : ICompactFil
 			await filterBatchClient.SendBatchAsync(cancellationToken).ConfigureAwait(false);
 			var filterResponses = await Task.WhenAll(filterTasks).ConfigureAwait(false);
 
+			var filters = new FilterModel[blockHashes.Length];
 			for (var i = 0; i < blockHashes.Length; i++)
 			{
 				var blockHash = blockHashes[i];
 				var filterResponse = filterResponses[i];
-				var height = (uint) heights[i];
+				var height = (uint)heights[i];
 
-				var filter = new FilterModel(
-					new SmartHeader(blockHash, filterResponse.Header, height, DateTimeOffset.UtcNow),
-					filterResponse.Filter);
+				var header = new SmartHeader(blockHash, filterResponse.Header, height, DateTimeOffset.UtcNow);
+				var filter = new FilterModel(header, filterResponse.Filter);
 
-				filters.Add(filter);
+				filters[i] = filter;
 			}
 
-			return filters.Count == 0
-				? new FiltersResponse.AlreadyOnBestBlock()
-				: new FiltersResponse.NewFiltersAvailable((uint)currentHeight, filters.ToArray());
+			return NewFiltersAvailable((uint)currentHeight, filters);
 		}
 		catch (RPCException e) when (e.RPCCode == RPCErrorCode.RPC_INVALID_PARAMETER) // Block height out of range
 		{
-			return new FiltersResponse.BestBlockUnknown();
+			return BestBlockUnknown;
 		}
 		catch (Exception e)
 		{
@@ -146,10 +95,10 @@ public class BitcoinRpcFilterProvider(IRPCClient bitcoinRpcClient) : ICompactFil
 
 public static class Synchronizer
 {
-	public static MessageHandler<Unit> CreateFilterGenerator(ICompactFilterProvider filtersProvider, BitcoinStore bitcoinStore, EventBus eventBus) =>
+	public static MessageHandler<Unit> CreateFilterGenerator(BitcoinRpcFilterProvider filtersProvider, BitcoinStore bitcoinStore, EventBus eventBus) =>
 		(_, cancellationToken) => GenerateCompactFiltersAsync(filtersProvider, bitcoinStore, eventBus, cancellationToken);
 
-	private static async Task<Unit> GenerateCompactFiltersAsync(ICompactFilterProvider filtersProvider, BitcoinStore bitcoinStore, EventBus eventBus, CancellationToken cancellationToken)
+	private static async Task<Unit> GenerateCompactFiltersAsync(BitcoinRpcFilterProvider filtersProvider, BitcoinStore bitcoinStore, EventBus eventBus, CancellationToken cancellationToken)
 	{
 		var smartHeaderChain = bitcoinStore.SmartHeaderChain;
 
